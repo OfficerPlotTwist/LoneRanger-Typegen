@@ -79,8 +79,9 @@ For the glyph shown in a panel, the guides actually used are computed live:
 - Oblique angle control (number + slider) → drives `K`, rotates ╱ family.
 - Angled angle control (number + slider) → `dAngle`.
 - Fill-pair selector (unchanged).
-- Metric-frame controls: baseline / x-height / cap / ascender / descender Y,
-  default advance width, default sidebearing.
+- Metric-frame controls: baseline / x-height / cap / ascender / descender Y
+  (numeric inputs, mirrored by draggable on-canvas lines — see below), default
+  advance width, default sidebearing.
 - Snap / nodes / trace toggles (unchanged).
 - Font import (reuse existing opentype.js glyph→cells importer, targets the
   focused panel).
@@ -97,6 +98,12 @@ render loop. Panel header:
 
 The active tool is global; the panel under the pointer receives the action
 (add/fill/erase/drag). Angle and metric changes re-render all three panels.
+
+**Metric lines are draggable on-canvas.** Each panel draws the global metric frame
+(baseline, x-height, cap, ascender, descender) as distinctly-styled horizontal
+lines; dragging one in any panel updates the global metric value and re-renders all
+panels, the numeric inputs, and the sample strip. They are global, so a drag in one
+panel moves them everywhere.
 
 ### Sample strip (bottom)
 - Editable text field, default `abcdefghijklmnopqrstuvwxyz`.
@@ -139,14 +146,20 @@ Load validates and rehydrates, preserving guide IDs.
 
 Kept largely intact and shared across panels:
 - Guide families `FAM`, `intersect`, `corners`, cell model, snap helpers.
-- Fill/erase/select, subdivide, undo (undo becomes per-panel-aware or global —
-  decided in the plan).
+- Fill/erase/select, subdivide.
+- **Undo: one global history** spanning all panels, the shared guides, angles,
+  metrics, and the alphabet store. Any edit in any panel pushes one global
+  snapshot; undo reverts the most recent change regardless of which panel made it.
 - SVG path import (`importSVG`) and font→cells (`placefont`).
 - Edge-merge exporter geometry (`mergedPaths`, `groupLoops`) — feeds both .otf and
   sample rendering.
 
+## Resolved decisions
+
+- **Undo:** one global history across all panels (see Reuse section).
+- **Metric frame lines:** draggable on-canvas, mirrored to numeric inputs (see
+  Editor panel section).
+
 ## Open questions deferred to the implementation plan
 
-- Undo scope: one global history vs per-panel.
-- Whether the metric frame lines are draggable in-canvas or numeric-only.
 - Exact punctuation set in the dropdown.
