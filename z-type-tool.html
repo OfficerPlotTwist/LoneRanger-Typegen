@@ -192,23 +192,23 @@ function corners(cell){
   return q.some(p=>!p)?null:q;
 }
 
-// ---- undo history ----
-// Guides/angles are global; cells are per-glyph. Each snapshot records the cells
-// of the glyph that was active when the edit happened (by char), so undo restores
-// THAT glyph's cells back into its record without touching other glyphs.
+// ---- undo history (global: covers shared guides/angles AND every glyph's cells) ----
 let history=[];
-const cloneCells = arr => arr.map(c=> c.rings?{rings:c.rings.map(r=>r.map(p=>p.slice())),glyph:c.glyph}
-                    : c.free?{free:c.free.map(p=>p.slice())} : {...c});
-function snapshot(){ return {
-  hG:hG.map(g=>({id:g.id,v:g.v})), oG:oG.map(g=>({id:g.id,v:g.v})),
-  dG:dG.map(g=>({id:g.id,px:g.px})), dAngle, K, oAngle,
-  ch:activeChar(), cells:cloneCells(activeCells()), nextId }; }
+function snapshot(){
+  const glyphs={};
+  for(const [c,g] of GLYPHS) glyphs[c]=JSON.parse(JSON.stringify(g));
+  return { hG:JSON.parse(JSON.stringify(hG)), oG:JSON.parse(JSON.stringify(oG)),
+           dG:JSON.parse(JSON.stringify(dG)), dAngle, K, oAngle, nextId, glyphs };
+}
 function pushHistory(){ history.push(snapshot()); if(history.length>200) history.shift(); }
-function undo(){ if(!history.length) return; const s=history.pop();
+function undo(){
+  if(!history.length) return;
+  const s=history.pop();
   hG=s.hG; oG=s.oG; dG=s.dG; dAngle=s.dAngle; K=s.K; oAngle=s.oAngle; nextId=s.nextId;
-  glyphOf(s.ch).cells = s.cells;
-  syncAngleUI(); syncObliqueUI(); updateSlope();
-  activeEditor().clearSelection(); renderAll(); scheduleSave(); }
+  GLYPHS.clear(); for(const c in s.glyphs) GLYPHS.set(c, s.glyphs[c]);
+  for(const e of editors) e.clearSelection();
+  syncAngleUI(); syncObliqueUI(); updateSlope(); renderAll(); scheduleSave();
+}
 
 const SNAP = 8;               // px snap radius to nice grid
 function snapY(y){ if(!snap) return y; let r=Math.round(y/16)*16; return Math.abs(r-y)<SNAP?r:y; }
