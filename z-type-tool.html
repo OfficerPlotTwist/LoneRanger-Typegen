@@ -22,6 +22,7 @@
   button.oblique.on{outline-color:var(--oblique)}
   button.horiz.on{outline-color:var(--horiz)}
   button.diag.on{outline-color:var(--diag)}
+  .split.on{outline:2px solid var(--oblique)}
   label{color:var(--mut);font-size:11px;display:flex;gap:5px;align-items:center}
   input[type=range]{width:96px}
   #panels{flex:1;min-height:0;display:flex;gap:8px;padding:8px;background:#000}
@@ -182,26 +183,72 @@ function syncMetricUI(){ document.querySelectorAll('.mnum').forEach(inp=>inp.val
 
 const byId = (arr,id)=>arr.find(g=>g.id===id);
 
-// Guide families. Each parallel family exposes its array, a guide's scalar value,
-// the value of an arbitrary point, and the infinite line (point + direction) of a guide.
+// ---- effective guides per glyph -------------------------------------------------
+// When a glyph is NOT split, its effective guides ARE the shared globals (byte-for-byte
+// identical behaviour). When split, the glyph gains its OWN EXTRA local guides layered
+// ON TOP of the still-live shared guides: effective = shared.concat(local-extra).
+// (Task 6 will add detach/stop-propagate; not built here.)
+function effGuides(g){
+  if(!g||!g.split) return {h:hG, o:oG, d:dG};
+  const L=g.localGuides||{hG:[],oG:[],dG:[]};
+  return { h:hG.concat(L.hG), o:oG.concat(L.oG), d:dG.concat(L.dG) };   // detach handled in Task 6
+}
+const SHARED_EFF = ()=>({h:hG, o:oG, d:dG});   // the shared-only effective set (split OFF default)
+
+// find the guide object with `id` in family `type` for glyph `g`, searching the
+// SHARED array first then the glyph's local-extra array. Returns the live object to
+// mutate (so dragging touches whichever array actually holds it).
+function findGuide(g,type,id){
+  const shared = type==='h'?hG : type==='o'?oG : dG;
+  let f=byId(shared,id); if(f) return f;
+  if(g&&g.split&&g.localGuides){
+    const local = type==='h'?g.localGuides.hG : type==='o'?g.localGuides.oG : g.localGuides.dG;
+    if(local) return byId(local,id)||null;
+  }
+  return null;
+}
+
+// add a guide of `type` (value=v for h/o, px for d). While split, the new guide goes
+// into the current glyph's local-extra set; otherwise into the shared set.
+function addGuide(g,type,value){
+  if(g&&g.split){
+    g.localGuides=g.localGuides||{hG:[],oG:[],dG:[]};
+    const arr = type==='h'?g.localGuides.hG : type==='o'?g.localGuides.oG : g.localGuides.dG;
+    arr.push(type==='d'?{id:nextId++,px:value}:{id:nextId++,v:value});
+  } else {
+    const arr = type==='h'?hG : type==='o'?oG : dG;
+    arr.push(type==='d'?{id:nextId++,px:value}:{id:nextId++,v:value});
+  }
+}
+
+// Guide families. Each parallel family exposes a guide's scalar value, the value of an
+// arbitrary point, and the infinite line (point + direction) of a guide. `arr()` returns
+// the SHARED globals; guide READS for a glyph go through an explicit effective set (eff.h/
+// eff.o/eff.d) instead, so split glyphs see shared∪local.
 const FAM = {
   h:{ arr:()=>hG, val:g=>g.v,  coord:p=>p.y,            line:g=>({p:[0,g.v],  d:[1,0]}) },
   o:{ arr:()=>oG, val:g=>g.v,  coord:p=>p.x+K*p.y,      line:g=>({p:[g.v,0],  d:[-K,1]}) },
   d:{ arr:()=>dG, val:g=>g.px, coord:p=>{ const a=dAngle*Math.PI/180; return p.x+(p.y-CY)*Math.cos(a)/Math.sin(a); },
       line:g=>{ const a=dAngle*Math.PI/180; return {p:[g.px,CY], d:[Math.cos(a),-Math.sin(a)]}; } },
 };
+// pick the effective array for a family from an eff set ({h,o,d}); defaults to shared.
+function effArr(eff,fam){ const e=eff||SHARED_EFF(); return fam==='h'?e.h : fam==='o'?e.o : e.d; }
 function intersect(L1,L2){
   const [x1,y1]=L1.p,[dx1,dy1]=L1.d,[x2,y2]=L2.p,[dx2,dy2]=L2.d;
   const den=dx1*dy2-dy1*dx2; if(Math.abs(den)<1e-9) return null;       // parallel families
   const t=((x2-x1)*dy2-(y2-y1)*dx2)/den;
   return [x1+t*dx1, y1+t*dy1];
 }
-// corners of a cell, computed live from its two bounding guide-pairs (null if orphaned)
-function corners(cell){
+// corners of a cell, computed live from its two bounding guide-pairs (null if orphaned).
+// `eff` is the glyph's effective guide set ({h,o,d}); defaults to the shared globals so
+// callers that pass nothing behave exactly as before. byId searches the effective array
+// so a cell bound to either a shared or a local guide id resolves.
+function corners(cell,eff){
   if(cell.free) return cell.free;
   const A=FAM[cell.fa], B=FAM[cell.fb];
-  const a0=byId(A.arr(),cell.ga0), a1=byId(A.arr(),cell.ga1),
-        b0=byId(B.arr(),cell.gb0), b1=byId(B.arr(),cell.gb1);
+  const Aa=effArr(eff,cell.fa), Bb=effArr(eff,cell.fb);
+  const a0=byId(Aa,cell.ga0), a1=byId(Aa,cell.ga1),
+        b0=byId(Bb,cell.gb0), b1=byId(Bb,cell.gb1);
   if(!a0||!a1||!b0||!b1) return null;
   const La0=A.line(a0),La1=A.line(a1),Lb0=B.line(b0),Lb1=B.line(b1);
   const q=[intersect(La0,Lb0),intersect(La1,Lb0),intersect(La1,Lb1),intersect(La0,Lb1)];
@@ -247,20 +294,32 @@ function svgEl(n,attrs){ const e=document.createElementNS('http://www.w3.org/200
 
 // a cell renders as one or more rings: guide-bound/simple cells have one (from corners),
 // glyph & holed cells carry several in .rings. Null => orphaned (drop it).
-function cellRings(cell){
+function cellRings(cell,eff){
   if(cell.rings) return cell.rings.every(r=>r&&r.length>=3) ? cell.rings : null;
-  const c=corners(cell); return c?[c]:null;
+  const c=corners(cell,eff); return c?[c]:null;
 }
 const ringPath=r=>'M'+r.map(p=>p.map(n=>+n.toFixed(2)).join(' ')).join(' L ')+' Z';
 
-// delete a guide from the SHARED set, then refresh every panel.
-// Removing a shared guide can orphan cells in several glyphs; each panel's render()
-// prunes its OWN glyph's orphans and clears only its OWN selection.
+// delete a guide, then refresh every panel. The id is removed from the SHARED set if it
+// lives there; otherwise (a split glyph's local-extra guide) it is removed from whichever
+// glyph's local set holds it. Removing a shared guide can orphan cells in several glyphs;
+// each panel's render() prunes its OWN glyph's orphans and clears only its OWN selection.
 function delGuide(type,id){
   pushHistory();
-  if(type==='h') hG=hG.filter(g=>g.id!==id);
-  else if(type==='o') oG=oG.filter(g=>g.id!==id);
-  else dG=dG.filter(g=>g.id!==id);
+  const sharedArr = type==='h'?hG : type==='o'?oG : dG;
+  if(byId(sharedArr,id)){
+    if(type==='h') hG=hG.filter(g=>g.id!==id);
+    else if(type==='o') oG=oG.filter(g=>g.id!==id);
+    else dG=dG.filter(g=>g.id!==id);
+  } else {
+    // not shared: find and splice from the local-extra set that owns it
+    for(const g of GLYPHS.values()){
+      if(!g.split||!g.localGuides) continue;
+      const local = type==='h'?g.localGuides.hG : type==='o'?g.localGuides.oG : g.localGuides.dG;
+      const k=local.findIndex(x=>x.id===id);
+      if(k>=0){ local.splice(k,1); break; }
+    }
+  }
   renderAll(); scheduleSave();
 }
 
@@ -286,8 +345,23 @@ function Editor(host){
   const letterSel = document.createElement('select'); letterSel.className='letter';
   for(const c of ALPHABET){ const o=document.createElement('option'); o.value=c; o.textContent=c; letterSel.appendChild(o); }
   letterSel.value = ch;
-  letterSel.addEventListener('change', ()=>{ ch=letterSel.value; selected.clear(); render(); scheduleSave(); });
+  letterSel.addEventListener('change', ()=>{ ch=letterSel.value; selected.clear(); render(); scheduleSave(); syncSplitUI(); });
   host.querySelector('.phead').insertBefore(letterSel, host.querySelector('.zin'));
+  // per-panel Split toggle: turns ON this glyph's EXTRA local guides (layered on shared).
+  // detachBtn is built by Task 6; guard its show/hide so this doesn't throw before then.
+  let detachBtn=null;   // placeholder for Task 6 (detach/stop-propagate)
+  const splitBtn=document.createElement('button'); splitBtn.className='split'; splitBtn.textContent='⑃ split';
+  splitBtn.addEventListener('click',()=>{
+    pushHistory(); const g=glyphOf(ch);
+    g.split=!g.split; if(g.split && !g.localGuides) g.localGuides={hG:[],oG:[],dG:[]};
+    splitBtn.classList.toggle('on',g.split);
+    if(detachBtn) detachBtn.style.display = g.split?'':'none';   // detachBtn from Task 6
+    render(); scheduleSave();
+  });
+  host.querySelector('.phead').insertBefore(splitBtn, host.querySelector('.zin'));
+  // reflect the current glyph's split state on the toggle (e.g. after a letter change/load)
+  function syncSplitUI(){ splitBtn.classList.toggle('on', !!glyphOf(ch).split); }
+  syncSplitUI();
   const body = host.querySelector('.pbody');
   const svg = document.createElementNS('http://www.w3.org/2000/svg','svg');
   svg.setAttribute('viewBox','0 0 1280 1280');
@@ -351,6 +425,8 @@ function Editor(host){
     g.appendChild(hit); g.appendChild(vis); return g;
   }
   function render(){
+    // effective guides for THIS panel's glyph: shared when not split, shared∪local when split.
+    const EFF = effGuides(glyphOf(ch));
     // underlay + trace reflect shared preset/UI state (per-panel image, same source)
     gUnder.style.display = _underHref ? '' : 'none';
     if(_underHref){
@@ -363,23 +439,23 @@ function Editor(host){
     // clear only THIS panel's selection if any were dropped. Operates strictly on the
     // current glyph + this closure's `selected` so no other panel/glyph is touched.
     const list=cells(), before=list.length;
-    const kept=list.filter(c=>cellRings(c)!==null);
+    const kept=list.filter(c=>cellRings(c,EFF)!==null);
     if(kept.length!==before){ setCells(kept); selected.clear(); }
     const cs=cells();
     clear(gFills);
     for(let j=0;j<cs.length;j++){
-      const d=cellRings(cs[j]).map(ringPath).join(' ');   // evenodd => counters/holes punch through
+      const d=cellRings(cs[j],EFF).map(ringPath).join(' ');   // evenodd => counters/holes punch through
       gFills.appendChild(svgEl('path',{d,'fill-rule':'evenodd',class:'cell'+(selected.has(j)?' sel':'')}));
     }
-    // guides
+    // guides (draw the effective set: shared + any local-extra of a split glyph)
     clear(gGuides);
     const R=200000;
-    hG.forEach(g=> gGuides.appendChild(guideEl('h',g.id, -R,g.v, R,g.v)));
-    oG.forEach(g=> gGuides.appendChild(guideEl('o',g.id, xOf(g.v,-R),-R, xOf(g.v,R),R)));
-    if(dG.length){
+    EFF.h.forEach(g=> gGuides.appendChild(guideEl('h',g.id, -R,g.v, R,g.v)));
+    EFF.o.forEach(g=> gGuides.appendChild(guideEl('o',g.id, xOf(g.v,-R),-R, xOf(g.v,R),R)));
+    if(EFF.d.length){
       gGuides.appendChild(svgEl('line',{x1:-R,y1:CY,x2:R,y2:CY,class:'axis'})); // center line
       const a=dAngle*Math.PI/180, cs=Math.cos(a), sn=Math.sin(a);              // dir = (cos, -sin)
-      dG.forEach(g=>{
+      EFF.d.forEach(g=>{
         gGuides.appendChild(guideEl('d',g.id, g.px-R*cs, CY+R*sn, g.px+R*cs, CY-R*sn));
         gGuides.appendChild(svgEl('circle',{cx:g.px,cy:CY,r:6,class:'dpivot'}));
       });
@@ -393,16 +469,18 @@ function Editor(host){
       gGuides.appendChild(svgEl('line',{x1:-R,y1:y,x2:R,y2:y,class:'mline'}));
       gGuides.appendChild(svgEl('text',{x:vb.x+8,y:y-4,class:'mlabel-t'})).textContent=key;
     }
-    // nodes
+    // nodes (intersections of this glyph's effective ‖ × ╱ guides)
     clear(gNodes);
     if(document.getElementById('t-nodes').checked){
-      for(const a of hG) for(const b of oG)
+      for(const a of EFF.h) for(const b of EFF.o)
         gNodes.appendChild(svgEl('circle',{cx:xOf(b.v,a.v),cy:a.v,r:5,class:'node'}));
     }
-    // shared status counters (same numbers for every panel; cheap to re-set)
-    document.getElementById('nH').textContent = hG.length;
-    document.getElementById('nO').textContent = oG.length;
-    if(i===_active) document.getElementById('nF').textContent = cells().length;
+    // status counters: reflect the ACTIVE panel's effective set (split shows shared+local).
+    if(i===_active){
+      document.getElementById('nH').textContent = EFF.h.length;
+      document.getElementById('nO').textContent = EFF.o.length;
+      document.getElementById('nF').textContent = cells().length;
+    }
   }
 
   // ---- dragging guides (mutates shared guides -> renderAll so all panels track) ----
@@ -417,9 +495,10 @@ function Editor(host){
   }
   function onDrag(e){
     if(!drag) return;
-    const p=toSVG(e);
-    if(drag.type==='d'){ const g=byId(dG,drag.id); if(g) g.px=snapX(p.x); }
-    else { const arr=drag.type==='h'?hG:oG, g=byId(arr,drag.id);
+    const p=toSVG(e), gl=glyphOf(ch);
+    // mutate whichever array (shared or this glyph's local-extra) actually holds the id.
+    if(drag.type==='d'){ const g=findGuide(gl,'d',drag.id); if(g) g.px=snapX(p.x); }
+    else { const g=findGuide(gl,drag.type,drag.id);
       if(g) g.v = drag.type==='h' ? snapY(p.y) : snapC(cval(p.x,p.y)); }
     renderAll();
   }
@@ -452,9 +531,10 @@ function Editor(host){
     if(e.target.classList.contains('gline-hit') && mode==='move') return; // guide drag handles it
     if(e.target.classList.contains('mline-hit') && mode==='move') return; // metric drag handles it
     const p=toSVG(e);
-    if(mode==='addh'){ pushHistory(); hG.push(mkG(snapY(p.y))); renderAll(); scheduleSave(); }
-    else if(mode==='addo'){ pushHistory(); oG.push(mkG(snapC(cval(p.x,p.y)))); renderAll(); scheduleSave(); }
-    else if(mode==='addd'){ pushHistory(); dG.push({id:nextId++, px:snapX(p.x)}); renderAll(); scheduleSave(); }
+    // while split, new guides go to THIS glyph's local-extra set; else to the shared set.
+    if(mode==='addh'){ pushHistory(); addGuide(glyphOf(ch),'h',snapY(p.y)); renderAll(); scheduleSave(); }
+    else if(mode==='addo'){ pushHistory(); addGuide(glyphOf(ch),'o',snapC(cval(p.x,p.y))); renderAll(); scheduleSave(); }
+    else if(mode==='addd'){ pushHistory(); addGuide(glyphOf(ch),'d',snapX(p.x)); renderAll(); scheduleSave(); }
     else if(mode==='fill'){ toggleCell(p); }
     else if(mode==='erase'){ eraseAt(p); }
     else if(mode==='move'){ selectAt(p, e.shiftKey); }
@@ -472,16 +552,17 @@ function Editor(host){
 
   // ---- per-glyph cell ops (operate on THIS panel's glyph + this panel's selection) ----
   function cellAt(p){
-    const cs=cells();
-    for(let k=cs.length-1;k>=0;k--){ const r=cellRings(cs[k]); if(r&&inCell([p.x,p.y],r)) return k; }
+    const cs=cells(), EFF=effGuides(glyphOf(ch));
+    for(let k=cs.length-1;k>=0;k--){ const r=cellRings(cs[k],EFF); if(r&&inCell([p.x,p.y],r)) return k; }
     return -1;
   }
   function toggleCell(p){
+    const EFF=effGuides(glyphOf(ch));
     const [fa,fb]=fillPair;
-    const ba=bracketF(fa,p), bb=bracketF(fb,p);
+    const ba=bracketF(fa,p,EFF), bb=bracketF(fb,p,EFF);
     if(!ba||!bb) return;
     const cell={fa,ga0:ba[0].id,ga1:ba[1].id,fb,gb0:bb[0].id,gb1:bb[1].id};
-    if(!corners(cell)) return;                                  // families parallel here -> no cell
+    if(!corners(cell,EFF)) return;                             // families parallel here -> no cell
     pushHistory();
     const cs=cells();
     const idx=cs.findIndex(c=>sameCell(c,cell));
@@ -543,10 +624,11 @@ setActive(0);
 addEventListener('keydown',e=>{ if(e.code==='Space' && !spaceDown){ spaceDown=true; editors.forEach(ed=>ed.setCursor('grab')); e.preventDefault(); }});
 addEventListener('keyup',  e=>{ if(e.code==='Space'){ spaceDown=false; editors.forEach(ed=>ed.setCursor(mode==='pan'?'grab':'crosshair')); }});
 
-// bracket a point within a family -> [loGuide, hiGuide] (the two guides it sits between)
-function bracketF(fam,p){
+// bracket a point within a family -> [loGuide, hiGuide] (the two guides it sits between).
+// `eff` is the glyph's effective guide set; defaults to shared globals (split OFF identical).
+function bracketF(fam,p,eff){
   const F=FAM[fam], v=F.coord(p); let lo=null,hi=null;
-  for(const g of F.arr()){ const gv=F.val(g);
+  for(const g of effArr(eff,fam)){ const gv=F.val(g);
     if(gv<=v && (!lo||F.val(lo)<gv)) lo=g;
     if(gv>=v && (!hi||F.val(hi)>gv)) hi=g; }
   return (lo&&hi&&lo!==hi)?[lo,hi]:null;
@@ -575,8 +657,8 @@ function subdiv(arr){
 }
 // freeze guide-bound cells into free polygons (so they survive a grid reset); ring cells pass through.
 // Reset wipes the SHARED guides, which would orphan EVERY glyph's bound cells, so freeze them all.
-function freezeCellList(arr){ return arr.map(c=> c.rings?c : (corners(c)?{free:corners(c)}:null)).filter(Boolean); }
-function freezeCells(){ for(const g of GLYPHS.values()) g.cells = freezeCellList(g.cells); }
+function freezeCellList(arr,eff){ return arr.map(c=> c.rings?c : (corners(c,eff)?{free:corners(c,eff)}:null)).filter(Boolean); }
+function freezeCells(){ for(const g of GLYPHS.values()) g.cells = freezeCellList(g.cells, effGuides(g)); }
 
 // ---- toolbar wiring ----
 const modes={ 'm-move':'move','m-addh':'addh','m-addo':'addo','m-addd':'addd','m-fill':'fill','m-erase':'erase','m-pan':'pan' };
@@ -719,7 +801,8 @@ document.getElementById('export').onclick=()=>{
   const includeZ=document.getElementById('exp-z').checked;
   // simple single-ring cells get edge-merged; multi-ring (glyph/holed) cells stay their own evenodd shape
   const simple=[], compound=[];
-  for(const c of activeCells()){ const r=cellRings(c); if(!r) continue;   // export the active panel's glyph
+  const EFF=effGuides(glyphOf(activeChar()));                            // resolve against active glyph's effective set
+  for(const c of activeCells()){ const r=cellRings(c,EFF); if(!r) continue;   // export the active panel's glyph
     if(r.length>1) compound.push(r); else simple.push(r[0]); }
   const allPolys=simple.concat(compound.flat(), includeZ?[Z_PTS]:[]);
   if(!allPolys.length){ alert('Nothing to export — fill some cells first (or enable “incl. Z”).'); return; }
@@ -791,19 +874,19 @@ function deriveGuides(ring){                                     // snap-create 
   }
   return perFam;
 }
-function bindQuad(ring,perFam){                                  // clean 4-edge ring -> guide-bound cell
+function bindQuad(ring,perFam,eff){                              // clean 4-edge ring -> guide-bound cell
   if(ring.length!==4) return null;
   const fams=Object.keys(perFam).filter(f=>perFam[f].size===2);
   if(fams.length!==2) return null;
   const [fa,fb]=fams, A=[...perFam[fa]], B=[...perFam[fb]];
   const cell={fa,ga0:A[0],ga1:A[1],fb,gb0:B[0],gb1:B[1]};
-  return corners(cell)?cell:null;
+  return corners(cell,eff)?cell:null;
 }
 // one source element -> one cell; its rings derive guides, multi-ring elements keep holes (evenodd)
-function elementToCell(rings){
+function elementToCell(rings,eff){
   const perFam=deriveGuides(rings[0]); for(let i=1;i<rings.length;i++) deriveGuides(rings[i]);
   if(rings.length>1) return {rings, glyph:false};
-  return bindQuad(rings[0],perFam) || {free:rings[0]};
+  return bindQuad(rings[0],perFam,eff) || {free:rings[0]};
 }
 function importSVG(text){
   const doc=new DOMParser().parseFromString(text,'image/svg+xml');
@@ -817,7 +900,8 @@ function importSVG(text){
   if(!groups.length){ alert('No <polygon>, <polyline> or <path> geometry found in that SVG.'); return; }
   pushHistory();
   const cs=activeCells();                                  // import into the active panel's glyph
-  for(const rings of groups) cs.push(elementToCell(rings));
+  const EFF=effGuides(glyphOf(activeChar()));              // resolve binds against active glyph's effective set
+  for(const rings of groups) cs.push(elementToCell(rings,EFF));
   activeEditor().clearSelection(); renderAll(); scheduleSave();
 }
 const fileIn=document.getElementById('file');
