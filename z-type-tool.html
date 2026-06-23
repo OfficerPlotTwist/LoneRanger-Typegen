@@ -39,6 +39,9 @@
   .gline-o{stroke:var(--oblique);stroke-width:1.4;pointer-events:none}
   .gline-d{stroke:var(--diag);stroke-width:1.4;pointer-events:none}
   .axis{stroke:#666;stroke-width:1;stroke-dasharray:10 8;pointer-events:none}
+  .mline{stroke:#7a5cff;stroke-width:1;stroke-dasharray:4 6;pointer-events:none}
+  .mline-hit{stroke:transparent;stroke-width:14;cursor:ns-resize}
+  .mlabel-t{fill:#7a5cff;font-size:18px;pointer-events:none}
   .dpivot{fill:var(--diag);pointer-events:none}
   .node{fill:#fff;opacity:.55;pointer-events:none}
   .cell{fill:var(--fill)}
@@ -111,6 +114,15 @@
       <button id="placefont" disabled>▰ Place as cells</button>
       <input id="fontfile" type="file" accept=".ttf,.otf,.woff" style="display:none">
     </div>
+    <div class="grp" id="metricbar">
+      <label>asc <input data-m="ascender"   type="number" class="mnum" style="width:54px"></label>
+      <label>cap <input data-m="cap"        type="number" class="mnum" style="width:54px"></label>
+      <label>x   <input data-m="xHeight"    type="number" class="mnum" style="width:54px"></label>
+      <label>base<input data-m="baseline"   type="number" class="mnum" style="width:54px"></label>
+      <label>desc<input data-m="descender"  type="number" class="mnum" style="width:54px"></label>
+      <label>adv <input data-m="advance"    type="number" class="mnum" style="width:54px"></label>
+      <label>sb  <input data-m="sidebearing" type="number" class="mnum" style="width:44px"></label>
+    </div>
   </div>
 
   <div id="panels">
@@ -164,6 +176,10 @@ const ALPHABET = [...'abcdefghijklmnopqrstuvwxyz0123456789.,!?-'];
 let mode = 'move';
 let snap = true;
 
+const metrics = {baseline:1040,xHeight:560,cap:240,ascender:160,descender:1140,advance:760,sidebearing:80};
+const METRIC_KEYS = ['ascender','cap','xHeight','baseline','descender'];
+function syncMetricUI(){ document.querySelectorAll('.mnum').forEach(inp=>inp.value=metrics[inp.dataset.m]); }
+
 const byId = (arr,id)=>arr.find(g=>g.id===id);
 
 // Guide families. Each parallel family exposes its array, a guide's scalar value,
@@ -198,16 +214,18 @@ function snapshot(){
   const glyphs={};
   for(const [c,g] of GLYPHS) glyphs[c]=JSON.parse(JSON.stringify(g));
   return { hG:JSON.parse(JSON.stringify(hG)), oG:JSON.parse(JSON.stringify(oG)),
-           dG:JSON.parse(JSON.stringify(dG)), dAngle, K, oAngle, nextId, glyphs };
+           dG:JSON.parse(JSON.stringify(dG)), dAngle, K, oAngle, nextId, glyphs,
+           metrics:JSON.parse(JSON.stringify(metrics)) };
 }
 function pushHistory(){ history.push(snapshot()); if(history.length>200) history.shift(); }
 function undo(){
   if(!history.length) return;
   const s=history.pop();
   hG=s.hG; oG=s.oG; dG=s.dG; dAngle=s.dAngle; K=s.K; oAngle=s.oAngle; nextId=s.nextId;
+  if(s.metrics) Object.assign(metrics, s.metrics);
   GLYPHS.clear(); for(const c in s.glyphs) GLYPHS.set(c, s.glyphs[c]);
   for(const e of editors) e.clearSelection();
-  syncAngleUI(); syncObliqueUI(); updateSlope(); renderAll(); scheduleSave();
+  syncAngleUI(); syncObliqueUI(); updateSlope(); syncMetricUI(); renderAll(); scheduleSave();
 }
 
 const SNAP = 8;               // px snap radius to nice grid
@@ -366,6 +384,15 @@ function Editor(host){
         gGuides.appendChild(svgEl('circle',{cx:g.px,cy:CY,r:6,class:'dpivot'}));
       });
     }
+    // metric lines (global; rendered in every panel)
+    for(const key of METRIC_KEYS){
+      const y=metrics[key];
+      const hit=svgEl('line',{x1:-R,y1:y,x2:R,y2:y,class:'mline-hit'});
+      hit.dataset.metric=key; hit.addEventListener('pointerdown',startMetricDrag);
+      gGuides.appendChild(hit);
+      gGuides.appendChild(svgEl('line',{x1:-R,y1:y,x2:R,y2:y,class:'mline'}));
+      gGuides.appendChild(svgEl('text',{x:vb.x+8,y:y-4,class:'mlabel-t'})).textContent=key;
+    }
     // nodes
     clear(gNodes);
     if(document.getElementById('t-nodes').checked){
@@ -404,11 +431,26 @@ function Editor(host){
     renderAll(); scheduleSave();
   }
 
+  // ---- dragging metric lines (mutates GLOBAL metrics object -> renderAll) ----
+  let mdrag=null;
+  function startMetricDrag(e){
+    if(e.button!==0 || mode!=='move') return;
+    e.stopPropagation(); pushHistory();
+    mdrag=e.target.dataset.metric;
+    svg.setPointerCapture(e.pointerId);
+    svg.addEventListener('pointermove',onMetricDrag);
+    svg.addEventListener('pointerup',endMetricDrag);
+  }
+  function onMetricDrag(e){ if(!mdrag) return; metrics[mdrag]=Math.round(toSVG(e).y); syncMetricUI(); renderAll(); }
+  function endMetricDrag(){ if(!mdrag) return; mdrag=null;
+    svg.removeEventListener('pointermove',onMetricDrag); svg.removeEventListener('pointerup',endMetricDrag); scheduleSave(); }
+
   // ---- canvas clicks (add / fill / erase / select) ----
   svg.addEventListener('pointerdown',(e)=>{
     if(e.button===2) return;                                              // right-click = delete (handled below)
     if(e.button===1 || spaceDown || mode==='pan'){ startPan(e); return; } // pan
     if(e.target.classList.contains('gline-hit') && mode==='move') return; // guide drag handles it
+    if(e.target.classList.contains('mline-hit') && mode==='move') return; // metric drag handles it
     const p=toSVG(e);
     if(mode==='addh'){ pushHistory(); hG.push(mkG(snapY(p.y))); renderAll(); scheduleSave(); }
     else if(mode==='addo'){ pushHistory(); oG.push(mkG(snapC(cval(p.x,p.y)))); renderAll(); scheduleSave(); }
@@ -840,7 +882,7 @@ document.getElementById('placefont').onclick=()=>{
 function serializeStore(){
   const glyphs={};
   for(const [c,g] of GLYPHS) glyphs[c]={cells:g.cells, split:g.split, detached:g.detached, localGuides:g.localGuides};
-  return {v:1, K, oAngle, dAngle, hG, oG, dG, nextId, glyphs};
+  return {v:1, K, oAngle, dAngle, hG, oG, dG, nextId, glyphs, metrics};
 }
 let _saveT=null;
 function scheduleSave(){ clearTimeout(_saveT); _saveT=setTimeout(saveStore, 400); }
@@ -852,11 +894,18 @@ function loadStore(){
 }
 function applyProject(p){       // also reused by Task 8 JSON import
   K=p.K; oAngle=p.oAngle; dAngle=p.dAngle; hG=p.hG; oG=p.oG; dG=p.dG; nextId=p.nextId;
+  if(p.metrics) Object.assign(metrics, p.metrics);
   GLYPHS.clear();
   for(const c in p.glyphs){ const g=p.glyphs[c];
     GLYPHS.set(c,{cells:g.cells||[], split:!!g.split, detached:!!g.detached, localGuides:g.localGuides||null}); }
-  syncObliqueUI(); syncAngleUI(); updateSlope();
+  syncObliqueUI(); syncAngleUI(); updateSlope(); syncMetricUI();
 }
+
+// metric numeric input wiring
+document.querySelectorAll('.mnum').forEach(inp=>{
+  inp.addEventListener('change', ()=>{ pushHistory(); metrics[inp.dataset.m]=+inp.value||0; renderAll(); scheduleSave(); });
+});
+syncMetricUI();
 
 loadStore();        // rehydrate before the first paint
 renderAll();
