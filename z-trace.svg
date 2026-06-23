@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 1280" width="1280" height="1280">
+  <!-- Clean vector trace of the Z.ai mark.
+       Built on exactly two edge directions:
+         horizontal (bar long-edges) and oblique slope dx/dy = -0.7375 (~53.6 deg).
+       8 vertices, point-symmetric about (639.5, 639.5). -->
+  <rect width="1280" height="1280" fill="#000000"/>
+  <path fill="#ffffff" d="
+    M346 320
+    L1023 320
+    L620.6 865
+    L1002.3 865
+    L933 959
+    L256 959
+    L658.2 414
+    L276.7 414
+    Z"/>
+</svg>
