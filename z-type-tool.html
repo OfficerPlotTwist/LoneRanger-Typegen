@@ -23,6 +23,7 @@
   button.horiz.on{outline-color:var(--horiz)}
   button.diag.on{outline-color:var(--diag)}
   .split.on{outline:2px solid var(--oblique)}
+  .detach.on{outline:2px solid var(--diag)}
   label{color:var(--mut);font-size:11px;display:flex;gap:5px;align-items:center}
   input[type=range]{width:96px}
   #panels{flex:1;min-height:0;display:flex;gap:8px;padding:8px;background:#000}
@@ -187,18 +188,32 @@ const byId = (arr,id)=>arr.find(g=>g.id===id);
 // When a glyph is NOT split, its effective guides ARE the shared globals (byte-for-byte
 // identical behaviour). When split, the glyph gains its OWN EXTRA local guides layered
 // ON TOP of the still-live shared guides: effective = shared.concat(local-extra).
-// (Task 6 will add detach/stop-propagate; not built here.)
+// When ALSO detached (stop-propagate, Task 6), the live shared arrays are IGNORED and the
+// glyph reads off its FROZEN copy (localGuides.base, ids preserved) plus its extras:
+// effective = base.concat(local-extra). The combined localGuides shape is
+// { hG,oG,dG (EXTRAS), base:{hG,oG,dG}|null (FROZEN shared snapshot) }.
 function effGuides(g){
   if(!g||!g.split) return {h:hG, o:oG, d:dG};
-  const L=g.localGuides||{hG:[],oG:[],dG:[]};
-  return { h:hG.concat(L.hG), o:oG.concat(L.oG), d:dG.concat(L.dG) };   // detach handled in Task 6
+  const L=g.localGuides||(g.localGuides={hG:[],oG:[],dG:[],base:null});
+  if(g.detached && L.base)
+    return { h:L.base.hG.concat(L.hG), o:L.base.oG.concat(L.oG), d:L.base.dG.concat(L.dG) };
+  return { h:hG.concat(L.hG), o:oG.concat(L.oG), d:dG.concat(L.dG) };
 }
 const SHARED_EFF = ()=>({h:hG, o:oG, d:dG});   // the shared-only effective set (split OFF default)
 
-// find the guide object with `id` in family `type` for glyph `g`, searching the
-// SHARED array first then the glyph's local-extra array. Returns the live object to
-// mutate (so dragging touches whichever array actually holds it).
+// find the guide object with `id` in family `type` for glyph `g`. Returns the live object
+// to mutate so dragging touches whichever array actually holds it.
+//   - NOT detached: search the SHARED array first, then the glyph's local-extra array.
+//   - DETACHED: the shared arrays are off-limits; search the glyph's FROZEN base copy
+//     first, then its local-extra array (so a drag in a detached glyph never touches shared).
 function findGuide(g,type,id){
+  if(g&&g.split&&g.detached&&g.localGuides&&g.localGuides.base){
+    const L=g.localGuides;
+    const base = type==='h'?L.base.hG : type==='o'?L.base.oG : L.base.dG;
+    let b=byId(base,id); if(b) return b;
+    const extra = type==='h'?L.hG : type==='o'?L.oG : L.dG;
+    return (extra && byId(extra,id))||null;
+  }
   const shared = type==='h'?hG : type==='o'?oG : dG;
   let f=byId(shared,id); if(f) return f;
   if(g&&g.split&&g.localGuides){
@@ -208,11 +223,12 @@ function findGuide(g,type,id){
   return null;
 }
 
-// add a guide of `type` (value=v for h/o, px for d). While split, the new guide goes
-// into the current glyph's local-extra set; otherwise into the shared set.
+// add a guide of `type` (value=v for h/o, px for d). While split (attached OR detached),
+// the new guide goes into the current glyph's local-EXTRA set — never the shared globals
+// and never the frozen base; otherwise into the shared set.
 function addGuide(g,type,value){
   if(g&&g.split){
-    g.localGuides=g.localGuides||{hG:[],oG:[],dG:[]};
+    g.localGuides=g.localGuides||{hG:[],oG:[],dG:[],base:null};
     const arr = type==='h'?g.localGuides.hG : type==='o'?g.localGuides.oG : g.localGuides.dG;
     arr.push(type==='d'?{id:nextId++,px:value}:{id:nextId++,v:value});
   } else {
@@ -300,12 +316,25 @@ function cellRings(cell,eff){
 }
 const ringPath=r=>'M'+r.map(p=>p.map(n=>+n.toFixed(2)).join(' ')).join(' L ')+' Z';
 
-// delete a guide, then refresh every panel. The id is removed from the SHARED set if it
-// lives there; otherwise (a split glyph's local-extra guide) it is removed from whichever
-// glyph's local set holds it. Removing a shared guide can orphan cells in several glyphs;
-// each panel's render() prunes its OWN glyph's orphans and clears only its OWN selection.
-function delGuide(type,id){
+// delete a guide, then refresh every panel. `g` is the panel's active glyph (so a delete
+// inside a DETACHED glyph is scoped to its private base/extra copies and never touches the
+// shared globals — even though base ids collide with shared ids). For a non-detached glyph
+// the id is removed from the SHARED set if it lives there; otherwise (a split glyph's
+// local-extra guide) it is removed from whichever glyph's local set holds it. Removing a
+// shared guide can orphan cells in several glyphs; each panel's render() prunes its OWN
+// glyph's orphans and clears only its OWN selection.
+function delGuide(type,id,g){
   pushHistory();
+  // DETACHED glyph: confine the delete to this glyph's frozen base + local-extra arrays.
+  if(g&&g.split&&g.detached&&g.localGuides&&g.localGuides.base){
+    const L=g.localGuides;
+    const base = type==='h'?L.base.hG : type==='o'?L.base.oG : L.base.dG;
+    const extra = type==='h'?L.hG : type==='o'?L.oG : L.dG;
+    let k=base.findIndex(x=>x.id===id);
+    if(k>=0) base.splice(k,1);
+    else { k=extra.findIndex(x=>x.id===id); if(k>=0) extra.splice(k,1); }
+    renderAll(); scheduleSave(); return;
+  }
   const sharedArr = type==='h'?hG : type==='o'?oG : dG;
   if(byId(sharedArr,id)){
     if(type==='h') hG=hG.filter(g=>g.id!==id);
@@ -348,19 +377,41 @@ function Editor(host){
   letterSel.addEventListener('change', ()=>{ ch=letterSel.value; selected.clear(); render(); scheduleSave(); syncSplitUI(); });
   host.querySelector('.phead').insertBefore(letterSel, host.querySelector('.zin'));
   // per-panel Split toggle: turns ON this glyph's EXTRA local guides (layered on shared).
-  // detachBtn is built by Task 6; guard its show/hide so this doesn't throw before then.
-  let detachBtn=null;   // placeholder for Task 6 (detach/stop-propagate)
+  // detachBtn (built just below) is the stop-propagate sub-toggle; only meaningful when split.
+  let detachBtn=null;
   const splitBtn=document.createElement('button'); splitBtn.className='split'; splitBtn.textContent='⑃ split';
   splitBtn.addEventListener('click',()=>{
     pushHistory(); const g=glyphOf(ch);
-    g.split=!g.split; if(g.split && !g.localGuides) g.localGuides={hG:[],oG:[],dG:[]};
+    g.split=!g.split; if(g.split && !g.localGuides) g.localGuides={hG:[],oG:[],dG:[],base:null};
     splitBtn.classList.toggle('on',g.split);
-    if(detachBtn) detachBtn.style.display = g.split?'':'none';   // detachBtn from Task 6
+    if(detachBtn) detachBtn.style.display = g.split?'':'none';   // sub-toggle visible only while split
     render(); scheduleSave();
   });
   host.querySelector('.phead').insertBefore(splitBtn, host.querySelector('.zin'));
-  // reflect the current glyph's split state on the toggle (e.g. after a letter change/load)
-  function syncSplitUI(){ splitBtn.classList.toggle('on', !!glyphOf(ch).split); }
+  // per-panel stop-propagate (detach) sub-toggle: freezes a private, id-stable copy of the
+  // shared guides into localGuides.base so this glyph stops receiving shared-guide edits.
+  detachBtn=document.createElement('button'); detachBtn.className='detach'; detachBtn.textContent='⛔ stop sync';
+  detachBtn.style.display='none';
+  detachBtn.addEventListener('click',()=>{
+    const g=glyphOf(ch); if(!g.split) return; pushHistory();
+    g.detached=!g.detached;
+    if(g.detached){                                   // freeze current shared guides into base
+      g.localGuides=g.localGuides||{hG:[],oG:[],dG:[],base:null};
+      g.localGuides.base={ hG:JSON.parse(JSON.stringify(hG)),
+                           oG:JSON.parse(JSON.stringify(oG)),
+                           dG:JSON.parse(JSON.stringify(dG)) };   // ids copied verbatim
+    } else if(g.localGuides){ g.localGuides.base=null; }          // reattach: drop frozen copy, follow shared again
+    detachBtn.classList.toggle('on',g.detached);
+    render(); scheduleSave();
+  });
+  host.querySelector('.phead').insertBefore(detachBtn, host.querySelector('.zin'));
+  // reflect the current glyph's split + detached state on the toggles (after letter change/load)
+  function syncSplitUI(){
+    const g=glyphOf(ch);
+    splitBtn.classList.toggle('on', !!g.split);
+    detachBtn.style.display = g.split?'':'none';
+    detachBtn.classList.toggle('on', !!g.detached);
+  }
   syncSplitUI();
   const body = host.querySelector('.pbody');
   const svg = document.createElementNS('http://www.w3.org/2000/svg','svg');
@@ -421,7 +472,7 @@ function Editor(host){
     const vis = svgEl('line',{x1,y1,x2,y2,class:cls});
     hit.dataset.type=type; hit.dataset.id=id;
     hit.addEventListener('pointerdown', startDrag);
-    hit.addEventListener('dblclick', ()=>delGuide(type,id));
+    hit.addEventListener('dblclick', ()=>delGuide(type,id,glyphOf(ch)));
     g.appendChild(hit); g.appendChild(vis); return g;
   }
   function render(){
@@ -544,7 +595,7 @@ function Editor(host){
   svg.addEventListener('contextmenu',(e)=>{
     e.preventDefault();
     if(e.target.classList && e.target.classList.contains('gline-hit')){
-      delGuide(e.target.dataset.type, +e.target.dataset.id); return;
+      delGuide(e.target.dataset.type, +e.target.dataset.id, glyphOf(ch)); return;
     }
     const j=cellAt(toSVG(e));
     if(j>=0){ pushHistory(); cells().splice(j,1); selected.clear(); renderAll(); scheduleSave(); }
