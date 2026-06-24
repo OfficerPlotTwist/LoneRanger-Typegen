@@ -326,11 +326,11 @@ function undo(){
 }
 
 const SNAP = 8;               // px snap radius to nice grid
-function snapY(y){
+function snapY(y, exceptId){
   if(!snap) return y;
   // snap onto any of the 4 functional metric guides (baseline/cap/ascender/descender)
   // when within radius (x-height is reference-only and excluded since it's not in hG).
-  for(const g of hG){ if(g.metric && Math.abs(g.v-y)<SNAP) return g.v; }
+  for(const g of hG){ if(g.metric && g.id!==exceptId && Math.abs(g.v-y)<SNAP) return g.v; }
   let r=Math.round(y/16)*16; return Math.abs(r-y)<SNAP?r:y;
 }
 function snapC(c){ if(!snap) return c; let r=Math.round(c/16)*16; return Math.abs(r-c)<SNAP?r:c; }
@@ -600,7 +600,7 @@ function Editor(host){
     // mutate whichever array (shared or this glyph's local-extra) actually holds the id.
     if(drag.type==='d'){ const g=findGuide(gl,'d',drag.id); if(g) g.px=snapX(p.x); }
     else { const g=findGuide(gl,drag.type,drag.id);
-      if(g) g.v = drag.type==='h' ? snapY(p.y) : snapC(cval(p.x,p.y)); }
+      if(g) g.v = drag.type==='h' ? snapY(p.y, drag.id) : snapC(cval(p.x,p.y)); }
     renderAll();
   }
   function endDrag(){
@@ -1110,7 +1110,7 @@ function loadStore(){
 }
 function applyProject(p){       // also reused by Task 8 JSON import
   K=p.K; oAngle=p.oAngle; dAngle=p.dAngle; hG=p.hG; oG=p.oG; dG=p.dG; nextId=p.nextId;
-  if(p.metrics) Object.assign(metrics, p.metrics);
+  if(p.metrics){ for(const k of ['xHeight','advance','sidebearing']) if(p.metrics[k]!=null) metrics[k]=+p.metrics[k]; }
   // Migration: ensure the 4 metric guides exist in hG. Old saves carry them inside
   // p.metrics.{baseline,cap,ascender,descender}; seed any missing ones from there (else
   // defaults). Idempotent: ensureMetricGuides never duplicates an already-present key.
