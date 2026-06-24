@@ -132,6 +132,9 @@
       <label>adv <input data-m="advance"    type="number" class="mnum" style="width:54px"></label>
       <label>sb  <input data-m="sidebearing" type="number" class="mnum" style="width:44px"></label>
     </div>
+    <div class="grp">
+      <label>min gap <input id="mingap" type="number" min="0" step="1" style="width:54px"></label>
+    </div>
   </div>
 
   <div id="panels">
@@ -215,6 +218,9 @@ function syncMetricUI(){ document.querySelectorAll('.mnum').forEach(inp=>{
   const k=inp.dataset.m;
   inp.value = METRIC_SENTINEL.hasOwnProperty(k) ? metricY(k) : metrics[k];
 }); }
+
+let minGap = 0;   // min pixel gap enforced between guides in the same family during drag
+function syncGapUI(){ const el=document.getElementById('mingap'); if(el) el.value=Math.round(minGap); }
 
 const byId = (arr,id)=>arr.find(g=>g.id===id);
 
@@ -312,7 +318,7 @@ function snapshot(){
   for(const [c,g] of GLYPHS) glyphs[c]=JSON.parse(JSON.stringify(g));
   return { hG:JSON.parse(JSON.stringify(hG)), oG:JSON.parse(JSON.stringify(oG)),
            dG:JSON.parse(JSON.stringify(dG)), dAngle, K, oAngle, nextId, glyphs,
-           metrics:JSON.parse(JSON.stringify(metrics)) };
+           metrics:JSON.parse(JSON.stringify(metrics)), minGap };
 }
 function pushHistory(){ history.push(snapshot()); if(history.length>200) history.shift(); }
 function undo(){
@@ -320,9 +326,10 @@ function undo(){
   const s=history.pop();
   hG=s.hG; oG=s.oG; dG=s.dG; dAngle=s.dAngle; K=s.K; oAngle=s.oAngle; nextId=s.nextId;
   if(s.metrics) Object.assign(metrics, s.metrics);
+  if(typeof s.minGap==='number') minGap=s.minGap;
   GLYPHS.clear(); for(const c in s.glyphs) GLYPHS.set(c, s.glyphs[c]);
   for(const e of editors) e.clearSelection();
-  syncAngleUI(); syncObliqueUI(); updateSlope(); syncMetricUI(); renderAll(); scheduleSave();
+  syncAngleUI(); syncObliqueUI(); updateSlope(); syncMetricUI(); syncGapUI(); renderAll(); scheduleSave();
 }
 
 const SNAP = 8;               // px snap radius to nice grid
@@ -335,6 +342,21 @@ function snapY(y, exceptId){
 }
 function snapC(c){ if(!snap) return c; let r=Math.round(c/16)*16; return Math.abs(r-c)<SNAP?r:c; }
 function snapX(x){ if(!snap) return x; if(Math.abs(x-CX)<SNAP) return CX; let r=Math.round(x/16)*16; return Math.abs(r-x)<SNAP?r:x; }
+
+// ---- guide collision push: enforce minGap within a dragged guide's family ----
+// arr  = the effective family array (from effGuides(glyph)), already the right h/o/d slice.
+// famKey = 'h'|'o'|'d' (drives which scalar field to read/write).
+// g    = the guide object that was just moved (the drag target).
+// Mutates guide objects IN PLACE (they are shared by reference, so writes propagate).
+function pushFamily(arr, famKey, g){
+  if(!(minGap>0)) return;
+  const scal = famKey==='d' ? (x=>x.px) : (x=>x.v);
+  const setS  = famKey==='d' ? ((x,v)=>x.px=v) : ((x,v)=>x.v=v);
+  const fam=[...arr].sort((a,b)=>scal(a)-scal(b));
+  const idx=fam.indexOf(g); if(idx<0) return;
+  for(let j=idx+1;j<fam.length;j++) if(scal(fam[j])<scal(fam[j-1])+minGap) setS(fam[j],scal(fam[j-1])+minGap);
+  for(let j=idx-1;j>=0;j--)        if(scal(fam[j])>scal(fam[j+1])-minGap) setS(fam[j],scal(fam[j+1])-minGap);
+}
 
 // ---- coordinate helpers (shared math; per-surface toSVG lives in Editor) ----
 const cval = (x,y)=> x + K*y;            // oblique coordinate of a point
@@ -598,9 +620,17 @@ function Editor(host){
     if(!drag) return;
     const p=toSVG(e), gl=glyphOf(ch);
     // mutate whichever array (shared or this glyph's local-extra) actually holds the id.
-    if(drag.type==='d'){ const g=findGuide(gl,'d',drag.id); if(g) g.px=snapX(p.x); }
-    else { const g=findGuide(gl,drag.type,drag.id);
-      if(g) g.v = drag.type==='h' ? snapY(p.y, drag.id) : snapC(cval(p.x,p.y)); }
+    const eff=effGuides(gl);
+    if(drag.type==='d'){
+      const g=findGuide(gl,'d',drag.id);
+      if(g){ g.px=snapX(p.x); pushFamily(eff.d,'d',g); }
+    } else {
+      const g=findGuide(gl,drag.type,drag.id);
+      if(g){
+        g.v = drag.type==='h' ? snapY(p.y, drag.id) : snapC(cval(p.x,p.y));
+        pushFamily(drag.type==='h'?eff.h:eff.o, drag.type, g);
+      }
+    }
     renderAll();
   }
   function endDrag(){
@@ -1098,7 +1128,7 @@ document.getElementById('placefont').onclick=()=>{
 function serializeStore(){
   const glyphs={};
   for(const [c,g] of GLYPHS) glyphs[c]={cells:g.cells, split:g.split, detached:g.detached, localGuides:g.localGuides};
-  return {v:1, K, oAngle, dAngle, hG, oG, dG, nextId, glyphs, metrics};
+  return {v:1, K, oAngle, dAngle, hG, oG, dG, nextId, glyphs, metrics, minGap};
 }
 let _saveT=null;
 function scheduleSave(){ clearTimeout(_saveT); _saveT=setTimeout(saveStore, 400); }
@@ -1115,10 +1145,11 @@ function applyProject(p){       // also reused by Task 8 JSON import
   // p.metrics.{baseline,cap,ascender,descender}; seed any missing ones from there (else
   // defaults). Idempotent: ensureMetricGuides never duplicates an already-present key.
   ensureMetricGuides(p.metrics);
+  if(typeof p.minGap==='number') minGap=p.minGap;
   GLYPHS.clear();
   for(const c in p.glyphs){ const g=p.glyphs[c];
     GLYPHS.set(c,{cells:g.cells||[], split:!!g.split, detached:!!g.detached, localGuides:g.localGuides||null}); }
-  syncObliqueUI(); syncAngleUI(); updateSlope(); syncMetricUI();
+  syncObliqueUI(); syncAngleUI(); updateSlope(); syncMetricUI(); syncGapUI();
 }
 
 // metric numeric input wiring. The 4 functional metrics write to their tagged hG guide's
@@ -1129,6 +1160,10 @@ document.querySelectorAll('.mnum').forEach(inp=>{
     if(METRIC_SENTINEL.hasOwnProperty(k)){ const g=hG.find(g=>g.metric===k); if(g) g.v=val; }
     else metrics[k]=val;
     renderAll(); scheduleSave(); });
+});
+// min-gap input wiring
+document.getElementById('mingap').addEventListener('change', e=>{
+  pushHistory(); minGap=Math.max(0,+e.target.value||0); syncGapUI(); renderAll(); scheduleSave();
 });
 
 // ---- sample strip: live merged-outline specimen ----------------------------
@@ -1255,7 +1290,12 @@ document.getElementById('sampleTrack').addEventListener('input', renderSample);
 // Boot: rehydrate (which migrates metric guides into hG via applyProject) or, on a fresh
 // start with no save, seed the 4 metric guides into hG with defaults + sentinel ids.
 if(!loadStore()) ensureMetricGuides();
+// Initialize minGap AFTER metric guides are seeded (metricY is now valid).
+// applyProject/loadStore will override this if a saved value exists; for fresh starts,
+// default to 1/16 of cap height (baseline - cap) clamped to at least 1px.
+if(minGap===0) minGap = Math.max(1, (metricY('baseline') - metricY('cap')) / 16);
 syncMetricUI();
+syncGapUI();
 renderAll();
 </script>
 </body>
