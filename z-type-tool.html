@@ -111,6 +111,9 @@
       <label><input id="exp-z" type="checkbox" checked> incl. Z</label>
       <button id="export">⤓ Export SVG</button>
       <input id="file" type="file" accept=".svg,image/svg+xml" style="display:none">
+      <button id="saveproj">⤓ Save Project</button>
+      <button id="loadproj">⤒ Load Project</button>
+      <input id="projfile" type="file" accept=".json,application/json" style="display:none">
     </div>
     <div class="grp">
       <button id="loadfont">⤒ Font</button>
@@ -660,8 +663,18 @@ function Editor(host){
   function fitView(){ vb={x:0,y:0,w:1280,h:1280}; applyVB(); }
   function setCursor(c){ svg.style.cursor = c; }
 
+  function syncLetter(){
+    // After a project load, re-point this panel's dropdown to its current char and re-render.
+    // If ch is not a valid ALPHABET option, keep it selected (the glyph may simply be empty).
+    sel.value = ch;
+    selected.clear();
+    syncSplitUI();
+    render();
+  }
+  // expose sel so syncLetter can reference it; alias to letterSel
+  const sel = letterSel;
   return { el:host, id:i, render, fitView, applyVB, zoomTo:zoomAt, setCursor, _svg:svg,
-           get ch(){return ch}, cells, setCells, deleteSelected, clearSelection };
+           get ch(){return ch}, cells, setCells, deleteSelected, clearSelection, syncLetter };
 }
 
 // ---- shared underlay/trace state (set by Z preset; read by every panel) ----
@@ -968,6 +981,19 @@ const fileIn=document.getElementById('file');
 document.getElementById('import').onclick=()=>fileIn.click();
 fileIn.onchange=()=>{ const f=fileIn.files[0]; if(!f) return;
   const r=new FileReader(); r.onload=()=>{ importSVG(r.result); fileIn.value=''; }; r.readAsText(f); };
+
+// ---- project JSON save / load ----
+document.getElementById('saveproj').onclick=()=>{
+  const blob=new Blob([JSON.stringify(serializeStore(),null,0)],{type:'application/json'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='z-typeface.json'; a.click();
+  URL.revokeObjectURL(a.href);
+};
+const pf=document.getElementById('projfile');
+document.getElementById('loadproj').onclick=()=>pf.click();
+pf.onchange=()=>{ const f=pf.files[0]; if(!f) return; const r=new FileReader();
+  r.onload=()=>{ try{ pushHistory(); applyProject(JSON.parse(r.result));
+    for(const e of editors) e.syncLetter(); renderAll(); scheduleSave(); }
+    catch(err){ alert('Bad project file: '+err.message); } pf.value=''; }; r.readAsText(f); };
 
 // ---- font -> cells: load any (ideally angular) font and drop its glyph outlines in as cells ----
 // Each glyph becomes one cell carrying all its contours (evenodd), so counters/holes punch through.
