@@ -427,6 +427,28 @@ function cornerPathStr(ring, rounded){
   }
   return d+' Z';
 }
+// flattened sibling of cornerPathStr for OTF: same fillet, but each quad Bézier
+// pin->cur->pout is subdivided into `steps` straight segments -> array of [x,y].
+// Empty/null set -> ring.slice() (identical to the existing loop, untouched).
+function cornerLoopPts(ring, rounded, steps=8){
+  if(!rounded || !rounded.size) return ring.slice();
+  const c=centroidOf(ring), n=ring.length;
+  const sub=(a,b)=>[a[0]-b[0],a[1]-b[1]], add=(a,b)=>[a[0]+b[0],a[1]+b[1]],
+        mul=(a,s)=>[a[0]*s,a[1]*s], len=a=>Math.hypot(a[0],a[1]), unit=a=>{const L=len(a)||1;return[a[0]/L,a[1]/L];};
+  const out=[];
+  for(let i=0;i<n;i++){
+    const cur=ring[i], prev=ring[(i-1+n)%n], next=ring[(i+1)%n];
+    if(rounded.has(i)){
+      const r=cornerRadius[classifyCorner(cur,c)];
+      const t=Math.min(r,0.5*len(sub(prev,cur)),0.5*len(sub(next,cur)));
+      const pin=add(cur,mul(unit(sub(prev,cur)),t)), pout=add(cur,mul(unit(sub(next,cur)),t));
+      out.push(pin);
+      for(let k=1;k<=steps;k++){ const u=k/steps, mt=1-u;            // quadratic Bézier pin->cur->pout
+        out.push([mt*mt*pin[0]+2*mt*u*cur[0]+u*u*pout[0], mt*mt*pin[1]+2*mt*u*cur[1]+u*u*pout[1]]); }
+    } else out.push(cur);
+  }
+  return out;
+}
 function syncCornerUI(){ document.querySelectorAll('.cnum').forEach(inp=>{ inp.value=cornerRadius[inp.dataset.c]; }); }
 
 // delete a guide, then refresh every panel. `g` is the panel's active glyph (so a delete
@@ -1040,10 +1062,10 @@ function mergedLoops(polys){
 document.getElementById('export').onclick=()=>{
   const includeZ=document.getElementById('exp-z').checked;
   // simple single-ring cells get edge-merged; multi-ring (glyph/holed) cells stay their own evenodd shape
-  const simple=[], compound=[];
+  const simple=[], simpleCells=[], compound=[];
   const EFF=effGuides(glyphOf(activeChar()));                            // resolve against active glyph's effective set
   for(const c of activeCells()){ const r=cellRings(c,EFF); if(!r) continue;   // export the active panel's glyph
-    if(r.length>1) compound.push(r); else simple.push(r[0]); }
+    if(r.length>1) compound.push(r); else { simple.push(r[0]); simpleCells.push(c); } }   // keep cell ref alongside its ring
   const allPolys=simple.concat(compound.flat(), includeZ?[Z_PTS]:[]);
   if(!allPolys.length){ alert('Nothing to export — fill some cells first (or enable “incl. Z”).'); return; }
   const PAD=40, bb=bboxOf(allPolys);
@@ -1051,7 +1073,14 @@ document.getElementById('export').onclick=()=>{
   let s=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="${x.toFixed(1)} ${y.toFixed(1)} ${w.toFixed(1)} ${h.toFixed(1)}" width="${Math.round(w)}" height="${Math.round(h)}">\n`;
   s+=`  <rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${w.toFixed(1)}" height="${h.toFixed(1)}" fill="#000"/>\n`;
   if(includeZ) s+=`  <polygon fill="#fff" points="${ptsStr(Z_PTS)}"/>\n`;
-  for(const d of mergedPaths(simple)) s+=`  <path fill="#fff" d="${d}"/>\n`;          // edge-adjacent cells fused
+  // Un-rounded export keeps the byte-identical edge-merge; once ANY simple cell has a rounded
+  // corner, emit each simple cell as its own (rounded) <path> so the fillet survives.
+  const anyRounded=simpleCells.some(c=>{ const rs=cellRoundedSet(c); return rs && rs.size; });
+  if(anyRounded){
+    for(let i=0;i<simple.length;i++) s+=`  <path fill="#fff" d="${cornerPathStr(simple[i], cellRoundedSet(simpleCells[i]))}"/>\n`;
+  } else {
+    for(const d of mergedPaths(simple)) s+=`  <path fill="#fff" d="${d}"/>\n`;        // edge-adjacent cells fused
+  }
   for(const r of compound) s+=`  <path fill="#fff" fill-rule="evenodd" d="${r.map(loopPath).join(' ')}"/>\n`;
   s+=`</svg>\n`;
   const blob=new Blob([s],{type:'image/svg+xml'});
@@ -1312,8 +1341,11 @@ function glyphOutlinePaths(ch){
 function glyphRings(ch){
   const g=GLYPHS.get(ch); if(!g||!g.cells.length) return [];
   const eff=effGuides(g);
-  const simple=[], compound=[];
-  for(const c of g.cells){ const r=cellRings(c,eff); if(!r) continue; if(r.length>1) compound.push(r); else simple.push(r[0]); }
+  const simple=[], simpleCells=[], compound=[];
+  for(const c of g.cells){ const r=cellRings(c,eff); if(!r) continue; if(r.length>1) compound.push(r); else { simple.push(r[0]); simpleCells.push(c); } }
+  // Un-rounded glyph keeps the byte-identical edge-merge; rounded -> each simple cell as its own
+  // flattened (rounded) loop. theRing is the SAME single ring used to build simple.
+  if(glyphHasRounding(g)) return simple.map((ring,k)=>cornerLoopPts(ring, cellRoundedSet(simpleCells[k]))).concat(...compound);
   return mergedLoops(simple).concat(...compound);   // compound rings are already separate loops
 }
 
