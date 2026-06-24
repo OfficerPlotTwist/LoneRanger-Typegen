@@ -114,6 +114,7 @@
       <button id="saveproj">⤓ Save Project</button>
       <button id="loadproj">⤒ Load Project</button>
       <input id="projfile" type="file" accept=".json,application/json" style="display:none">
+      <button id="exportotf">⤓ Export .otf</button>
     </div>
     <div class="grp">
       <button id="loadfont">⤒ Font</button>
@@ -869,6 +870,16 @@ function mergedPaths(polys){
   const norms=polys.map(norm);
   return groupByEdge(norms).map(idxs=>groupLoops(idxs.map(i=>norms[i])).map(loopPath).join(' ')).filter(Boolean);
 }
+// sibling of mergedPaths that returns LOOPS as arrays of [x,y] points (not path strings).
+// Reuses the same merge engine: normalize winding, union edge-adjacent cells (groupByEdge),
+// stitch survivors into closed loops (groupLoops). Outer loops and holes come out oppositely
+// wound — exactly what opentype's nonzero fill needs (see buildFont).
+function mergedLoops(polys){
+  const norms=polys.map(norm);
+  const out=[];
+  for(const idxs of groupByEdge(norms)) for(const lp of groupLoops(idxs.map(i=>norms[i]))) out.push(lp);
+  return out;
+}
 
 document.getElementById('export').onclick=()=>{
   const includeZ=document.getElementById('exp-z').checked;
@@ -1111,6 +1122,48 @@ function glyphOutlineData(ch){
 function glyphOutlinePaths(ch){
   return glyphOutlineData(ch).paths;
 }
+
+// ---- .otf export via opentype.js -------------------------------------------
+// glyphRings: all merged outline loops (arrays of [x,y]) for a glyph in CANVAS coords,
+// resolved against the glyph's OWN effective guides (mirrors glyphOutlineData) so a
+// split/detached glyph exports the same outline the panel shows. Single-ring cells are
+// edge-merged via mergedLoops; multi-ring (holed/glyph) cells contribute their rings as-is.
+function glyphRings(ch){
+  const g=GLYPHS.get(ch); if(!g||!g.cells.length) return [];
+  const eff=effGuides(g);
+  const simple=[], compound=[];
+  for(const c of g.cells){ const r=cellRings(c,eff); if(!r) continue; if(r.length>1) compound.push(r); else simple.push(r[0]); }
+  return mergedLoops(simple).concat(...compound);   // compound rings are already separate loops
+}
+
+// buildFont: assemble an opentype.Font from every designed glyph.
+// Transform: canvas units -> 1000-upm em, with a Y-flip about the baseline so "up" is
+// positive em. cap line maps to ~UPM, baseline maps to 0. Winding from mergedLoops is
+// PRESERVED (no reversal): outer loops + holes are oppositely wound, which opentype's
+// nonzero fill needs to punch counters (e.g. the bowl of 'o'/'a').
+function buildFont(){
+  if(typeof opentype==='undefined'){ alert('opentype.js not loaded (needs network).'); return null; }
+  const UPM=1000, base=metrics.baseline, capH=Math.max(1, base-metrics.cap);
+  const s=UPM/capH;                                   // canvas units -> em units
+  const X=x=>x*s, Y=y=>(base-y)*s;                    // flip Y so up is positive em
+  const glyphs=[ new opentype.Glyph({name:'.notdef', unicode:0, advanceWidth:Math.round(metrics.advance*s), path:new opentype.Path()}) ];
+  for(const [ch,g] of GLYPHS){
+    const rings=glyphRings(ch); if(!rings.length) continue;
+    const path=new opentype.Path();
+    for(const lp of rings){ if(lp.length<3) continue;
+      path.moveTo(X(lp[0][0]), Y(lp[0][1]));
+      for(let i=1;i<lp.length;i++) path.lineTo(X(lp[i][0]), Y(lp[i][1]));
+      path.close();
+    }
+    glyphs.push(new opentype.Glyph({ name:ch, unicode:ch.codePointAt(0),
+      advanceWidth:Math.round(metrics.advance*s), path }));
+  }
+  if(glyphs.length<2){ alert('No designed glyphs to export.'); return null; }
+  return new opentype.Font({ familyName:'ZType', styleName:'Oblique', unitsPerEm:UPM,
+    ascender:Math.round((base-metrics.ascender)*s), descender:Math.round((base-metrics.descender)*s),
+    glyphs });
+}
+document.getElementById('exportotf').onclick=()=>{ const f=buildFont(); if(f) f.download('ZType-Oblique.otf'); };
 
 function renderSample(){
   const svgS = document.getElementById('sampleSvg');
