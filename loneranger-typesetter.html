@@ -337,7 +337,8 @@ function snapshot(){
            dG:JSON.parse(JSON.stringify(dG)), dAngle, K, oAngle, nextId, glyphs,
            metrics:JSON.parse(JSON.stringify(metrics)), minGap,
            cornerRadius:JSON.parse(JSON.stringify(cornerRadius)),
-           cornerShape:JSON.parse(JSON.stringify(cornerShape)) };
+           cornerShape:JSON.parse(JSON.stringify(cornerShape)),
+           kerning:JSON.parse(JSON.stringify(kerning)) };
 }
 function pushHistory(){ history.push(snapshot()); if(history.length>200) history.shift(); }
 function undo(){
@@ -348,6 +349,7 @@ function undo(){
   if(typeof s.minGap==='number') minGap=s.minGap;
   if(s.cornerRadius) Object.assign(cornerRadius, s.cornerRadius);
   if(s.cornerShape) Object.assign(cornerShape, s.cornerShape);
+  if(s.kerning){ for(const k in kerning) delete kerning[k]; Object.assign(kerning, s.kerning); }
   GLYPHS.clear(); for(const c in s.glyphs) GLYPHS.set(c, s.glyphs[c]);
   for(const e of editors) e.clearSelection();
   syncAngleUI(); syncObliqueUI(); updateSlope(); syncMetricUI(); syncGapUI(); syncCornerUI(); renderAll(); scheduleSave();
@@ -1286,8 +1288,8 @@ document.getElementById('placefont').onclick=()=>{
 // ============================================================================
 function serializeStore(){
   const glyphs={};
-  for(const [c,g] of GLYPHS) glyphs[c]={cells:g.cells, split:g.split, detached:g.detached, localGuides:g.localGuides};
-  return {v:1, K, oAngle, dAngle, hG, oG, dG, nextId, glyphs, metrics, minGap, cornerRadius, cornerShape};
+  for(const [c,g] of GLYPHS) glyphs[c]={cells:g.cells, split:g.split, detached:g.detached, localGuides:g.localGuides, lsb:g.lsb, rsb:g.rsb};
+  return {v:1, K, oAngle, dAngle, hG, oG, dG, nextId, glyphs, metrics, minGap, cornerRadius, cornerShape, kerning};
 }
 let _saveT=null;
 function scheduleSave(){ clearTimeout(_saveT); _saveT=setTimeout(saveStore, 400); }
@@ -1309,7 +1311,10 @@ function applyProject(p){       // also reused by Task 8 JSON import
   if(p.cornerShape) Object.assign(cornerShape, p.cornerShape);
   GLYPHS.clear();
   for(const c in p.glyphs){ const g=p.glyphs[c];
-    GLYPHS.set(c,{cells:g.cells||[], split:!!g.split, detached:!!g.detached, localGuides:g.localGuides||null}); }
+    GLYPHS.set(c,{cells:g.cells||[], split:!!g.split, detached:!!g.detached, localGuides:g.localGuides||null, lsb:g.lsb, rsb:g.rsb}); }
+  // restore kern map in place (clear+assign so held references stay valid)
+  for(const k in kerning) delete kerning[k];
+  if(p.kerning) Object.assign(kerning, p.kerning);
   syncObliqueUI(); syncAngleUI(); updateSlope(); syncMetricUI(); syncGapUI(); syncCornerUI();
 }
 
@@ -1394,6 +1399,32 @@ function glyphRings(ch){
   return mergedLoops(simple).concat(...compound);   // compound rings are already separate loops
 }
 
+// ---- spacing model: ink bounds + per-glyph advance + kern map ---------------
+// glyphInk reuses the SAME flattened outline geometry as the OTF export (glyphRings,
+// canvas coords, honors corner rounding + effGuides), so ink matches exactly what's drawn.
+// Returns {minx,maxx,width} of the glyph's ink bbox, or null if the glyph has no ink.
+function glyphInk(ch){
+  const g=GLYPHS.get(ch); if(!g) return null;
+  const loops=glyphRings(ch); if(!loops || !loops.length) return null;
+  let mn=Infinity, mx=-Infinity;
+  for(const lp of loops) for(const p of lp){ if(p[0]<mn)mn=p[0]; if(p[0]>mx)mx=p[0]; }
+  if(!isFinite(mn)) return null;
+  return {minx:mn, maxx:mx, width:Math.max(0, mx-mn)};
+}
+// glyphSpacing: per-glyph advance = lsb + inkWidth + rsb. lsb/rsb auto from the global
+// sidebearing unless overridden by g.lsb/g.rsb (Task 2). Empty/undesigned glyphs fall
+// back to metrics.advance and draw nothing.
+function glyphSpacing(ch){
+  const g=GLYPHS.get(ch), ink=glyphInk(ch);
+  if(!ink) return {empty:true, advance:metrics.advance, lsb:0, rsb:0, ink:null};
+  const lsb=(g&&typeof g.lsb==='number')?g.lsb:metrics.sidebearing;
+  const rsb=(g&&typeof g.rsb==='number')?g.rsb:metrics.sidebearing;
+  return {empty:false, lsb, rsb, ink, advance: lsb+ink.width+rsb};
+}
+// kern map: key = prev+ch (two-char string), value = extra px between that pair.
+// Mutated in place (clear+assign) by persistence so any held reference stays valid.
+const kerning={};
+
 // buildFont: assemble an opentype.Font from every designed glyph.
 // Transform: canvas units -> 1000-upm em, with a Y-flip about the baseline so "up" is
 // positive em. cap line maps to ~UPM, baseline maps to 0. Winding from mergedLoops is
@@ -1446,15 +1477,19 @@ function renderSample(){
   const viewH = maxH + t * (minH - maxH);   // lerp from maxH down to minH as sz increases
 
   let penX = metrics.sidebearing;
+  let prev = null;
 
   for(const chr of text){
-    if(chr === ' '){ penX += metrics.advance * 0.5 + track; continue; }
-    const {paths, minX} = glyphOutlineData(chr);
-    const tx = penX - minX;   // shift glyph so its own left edge sits at penX
+    if(prev !== null) penX += (kerning[prev+chr] || 0);   // pair kern before placing chr
+    const sp = glyphSpacing(chr);
+    if(sp.empty){ penX += sp.advance + track; prev = chr; continue; }   // empty -> advance, draw nothing
+    const {paths} = glyphOutlineData(chr);
+    const tx = penX + sp.lsb - sp.ink.minx;   // ink left edge sits at penX + lsb
     for(const d of paths){
       svgS.appendChild(svgEl('path', {d, fill:'#fff', transform:'translate('+tx+' 0)'}));
     }
-    penX += metrics.advance + track;
+    penX += sp.advance + track;
+    prev = chr;
   }
 
   const totalW = penX + metrics.sidebearing;
