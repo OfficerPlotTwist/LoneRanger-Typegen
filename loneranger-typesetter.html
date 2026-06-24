@@ -996,6 +996,7 @@ addEventListener('keydown',e=>{
   const t=e.target.tagName; if(t==='INPUT'||t==='TEXTAREA') return;
   if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){ e.preventDefault(); undo(); }
   else if(e.key==='Delete'||e.key==='Backspace'){
+    if(e.target.id==='sampleSvg') return;                     // sample strip owns Backspace (resets spacing)
     if(activeEditor().deleteSelected()) e.preventDefault();   // deletes from the active panel's glyph
   }
   else if(e.key==='Escape'){ activeEditor().clearSelection(); }
