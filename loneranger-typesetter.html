@@ -170,6 +170,22 @@ const SEED_O = [582, 963.3, 1259, 1640.3];           // the four slanted edges o
 // Guides carry a stable id so cells can stay bound to them across edits.
 let nextId = 1;
 const mkG = v => ({id:nextId++, v});
+// ---- metric guides: 4 functional metric lines live INSIDE hG as tagged, undeletable
+// members with FIXED NEGATIVE sentinel ids (never collide with nextId's positive ids,
+// stable across sessions). x-height stays reference-only in `metrics` (NOT here).
+const METRIC_SENTINEL = { baseline:-1, cap:-2, ascender:-3, descender:-4 };
+const METRIC_DEFAULTS = { baseline:1040, cap:240, ascender:160, descender:1140 };
+const METRIC_GUIDE_KEYS = ['baseline','cap','ascender','descender'];
+function metricY(key){ const g=hG.find(g=>g.metric===key); return g?g.v:(METRIC_DEFAULTS[key]||0); }
+// ensure exactly one tagged guide per metric key exists in hG (idempotent). `src` supplies
+// seed values for any that are missing (defaults to METRIC_DEFAULTS).
+function ensureMetricGuides(src){
+  for(const key of METRIC_GUIDE_KEYS){
+    if(hG.some(g=>g.metric===key)) continue;   // already present -> never duplicate
+    const v = (src && Number.isFinite(+src[key])) ? +src[key] : METRIC_DEFAULTS[key];
+    hG.push({id:METRIC_SENTINEL[key], v, metric:key});
+  }
+}
 let hG = [];                  // horizontal guides {id, v=y}      (blank by default)
 let oG = [];                  // oblique guides    {id, v=c}       (blank by default)
 let dG = [];                  // angled guides {id, px}: pivots on the Z center line, share dAngle
@@ -191,9 +207,14 @@ const ALPHABET = [...'abcdefghijklmnopqrstuvwxyz0123456789.,!?-'];
 let mode = 'move';
 let snap = true;
 
-const metrics = {baseline:1040,xHeight:560,cap:240,ascender:160,descender:1140,advance:760,sidebearing:80};
-const METRIC_KEYS = ['ascender','cap','xHeight','baseline','descender'];
-function syncMetricUI(){ document.querySelectorAll('.mnum').forEach(inp=>inp.value=metrics[inp.dataset.m]); }
+// The 4 functional metrics (baseline/cap/ascender/descender) now live as tagged hG guides
+// (single source of truth = the guide's .v, read via metricY). `metrics` keeps only the
+// reference-only x-height plus advance/sidebearing.
+const metrics = {xHeight:560,advance:760,sidebearing:80};
+function syncMetricUI(){ document.querySelectorAll('.mnum').forEach(inp=>{
+  const k=inp.dataset.m;
+  inp.value = METRIC_SENTINEL.hasOwnProperty(k) ? metricY(k) : metrics[k];
+}); }
 
 const byId = (arr,id)=>arr.find(g=>g.id===id);
 
@@ -305,7 +326,13 @@ function undo(){
 }
 
 const SNAP = 8;               // px snap radius to nice grid
-function snapY(y){ if(!snap) return y; let r=Math.round(y/16)*16; return Math.abs(r-y)<SNAP?r:y; }
+function snapY(y){
+  if(!snap) return y;
+  // snap onto any of the 4 functional metric guides (baseline/cap/ascender/descender)
+  // when within radius (x-height is reference-only and excluded since it's not in hG).
+  for(const g of hG){ if(g.metric && Math.abs(g.v-y)<SNAP) return g.v; }
+  let r=Math.round(y/16)*16; return Math.abs(r-y)<SNAP?r:y;
+}
 function snapC(c){ if(!snap) return c; let r=Math.round(c/16)*16; return Math.abs(r-c)<SNAP?r:c; }
 function snapX(x){ if(!snap) return x; if(Math.abs(x-CX)<SNAP) return CX; let r=Math.round(x/16)*16; return Math.abs(r-x)<SNAP?r:x; }
 
@@ -337,6 +364,11 @@ const ringPath=r=>'M'+r.map(p=>p.map(n=>+n.toFixed(2)).join(' ')).join(' L ')+' 
 // shared guide can orphan cells in several glyphs; each panel's render() prunes its OWN
 // glyph's orphans and clears only its OWN selection.
 function delGuide(type,id,g){
+  // metric guides (baseline/cap/ascender/descender) are undeletable: they can be dragged
+  // but never removed. They live in the shared hG (sentinel ids) and are copied verbatim
+  // into a detached glyph's frozen base, so guard via the live guide object in this glyph's
+  // effective set. No pushHistory / no render: a delete attempt is a true no-op.
+  if(type==='h'){ const gg=findGuide(g,'h',id); if(gg&&gg.metric) return; }
   pushHistory();
   // DETACHED glyph: confine the delete to this glyph's frozen base + local-extra arrays.
   if(g&&g.split&&g.detached&&g.localGuides&&g.localGuides.base){
@@ -478,15 +510,19 @@ function Editor(host){
     svg.removeEventListener('pointermove',onPan); svg.removeEventListener('pointerup',endPan); }
 
   // ---- rendering this panel from the shared state ----
-  function guideEl(type,id,x1,y1,x2,y2){
+  function guideEl(type,id,x1,y1,x2,y2,metric){
     const g = svgEl('g',{});
     const hit = svgEl('line',{x1,y1,x2,y2,class:'gline-hit'});
-    const cls = type==='h'?'gline-h':type==='o'?'gline-o':'gline-d';
+    // a tagged metric guide borrows the purple-dashed reference look + a name label, but
+    // keeps the .gline-hit so it stays draggable via the EXISTING guide drag.
+    const cls = metric ? 'mline' : type==='h'?'gline-h':type==='o'?'gline-o':'gline-d';
     const vis = svgEl('line',{x1,y1,x2,y2,class:cls});
     hit.dataset.type=type; hit.dataset.id=id;
     hit.addEventListener('pointerdown', startDrag);
     hit.addEventListener('dblclick', ()=>delGuide(type,id,glyphOf(ch)));
-    g.appendChild(hit); g.appendChild(vis); return g;
+    g.appendChild(hit); g.appendChild(vis);
+    if(metric) g.appendChild(svgEl('text',{x:vb.x+8,y:y1-4,class:'mlabel-t'})).textContent=metric;
+    return g;
   }
   function render(){
     // effective guides for THIS panel's glyph: shared when not split, shared∪local when split.
@@ -514,7 +550,7 @@ function Editor(host){
     // guides (draw the effective set: shared + any local-extra of a split glyph)
     clear(gGuides);
     const R=200000;
-    EFF.h.forEach(g=> gGuides.appendChild(guideEl('h',g.id, -R,g.v, R,g.v)));
+    EFF.h.forEach(g=> gGuides.appendChild(guideEl('h',g.id, -R,g.v, R,g.v, g.metric)));
     EFF.o.forEach(g=> gGuides.appendChild(guideEl('o',g.id, xOf(g.v,-R),-R, xOf(g.v,R),R)));
     if(EFF.d.length){
       gGuides.appendChild(svgEl('line',{x1:-R,y1:CY,x2:R,y2:CY,class:'axis'})); // center line
@@ -524,14 +560,15 @@ function Editor(host){
         gGuides.appendChild(svgEl('circle',{cx:g.px,cy:CY,r:6,class:'dpivot'}));
       });
     }
-    // metric lines (global; rendered in every panel)
-    for(const key of METRIC_KEYS){
-      const y=metrics[key];
+    // x-height: the ONLY remaining separately-rendered reference line (global, every panel).
+    // Draggable via startMetricDrag -> metrics.xHeight; NOT a fill/bind/snap guide.
+    {
+      const y=metrics.xHeight;
       const hit=svgEl('line',{x1:-R,y1:y,x2:R,y2:y,class:'mline-hit'});
-      hit.dataset.metric=key; hit.addEventListener('pointerdown',startMetricDrag);
+      hit.dataset.metric='xHeight'; hit.addEventListener('pointerdown',startMetricDrag);
       gGuides.appendChild(hit);
       gGuides.appendChild(svgEl('line',{x1:-R,y1:y,x2:R,y2:y,class:'mline'}));
-      gGuides.appendChild(svgEl('text',{x:vb.x+8,y:y-4,class:'mlabel-t'})).textContent=key;
+      gGuides.appendChild(svgEl('text',{x:vb.x+8,y:y-4,class:'mlabel-t'})).textContent='xHeight';
     }
     // nodes (intersections of this glyph's effective ‖ × ╱ guides)
     clear(gNodes);
@@ -754,13 +791,13 @@ function clearAllSelections(){ editors.forEach(ed=>ed.clearSelection()); }
 document.getElementById('sub-h').onclick=()=>{pushHistory();subdiv(hG);renderAll();scheduleSave();};
 document.getElementById('sub-o').onclick=()=>{pushHistory();subdiv(oG);renderAll();scheduleSave();};
 // Reset grid -> blank canvas: keep cell shapes (frozen to free) but clear all guides
-document.getElementById('reset').onclick=()=>{pushHistory();freezeCells();hG=[];oG=[];dG=[];clearAllSelections();renderAll();scheduleSave();};
+document.getElementById('reset').onclick=()=>{pushHistory();freezeCells();hG=[];oG=[];dG=[];ensureMetricGuides();clearAllSelections();renderAll();scheduleSave();};
 // Load Z preset -> restore the original Z wordmark guides + underlay + trace at the canonical angle.
 // Underlay/trace are shared state read by every panel's render().
 function loadZPreset(){
   pushHistory();
   K=0.7375; oAngle=53.6; syncObliqueUI(); updateSlope();
-  hG=SEED_H.map(mkG); oG=SEED_O.map(mkG);
+  hG=SEED_H.map(mkG); oG=SEED_O.map(mkG); ensureMetricGuides();   // keep the undeletable metric guides
   _underHref='zai.webp';
   _traceOn = document.getElementById('t-trace').checked;
   clearAllSelections(); renderAll(); scheduleSave();
@@ -1074,17 +1111,25 @@ function loadStore(){
 function applyProject(p){       // also reused by Task 8 JSON import
   K=p.K; oAngle=p.oAngle; dAngle=p.dAngle; hG=p.hG; oG=p.oG; dG=p.dG; nextId=p.nextId;
   if(p.metrics) Object.assign(metrics, p.metrics);
+  // Migration: ensure the 4 metric guides exist in hG. Old saves carry them inside
+  // p.metrics.{baseline,cap,ascender,descender}; seed any missing ones from there (else
+  // defaults). Idempotent: ensureMetricGuides never duplicates an already-present key.
+  ensureMetricGuides(p.metrics);
   GLYPHS.clear();
   for(const c in p.glyphs){ const g=p.glyphs[c];
     GLYPHS.set(c,{cells:g.cells||[], split:!!g.split, detached:!!g.detached, localGuides:g.localGuides||null}); }
   syncObliqueUI(); syncAngleUI(); updateSlope(); syncMetricUI();
 }
 
-// metric numeric input wiring
+// metric numeric input wiring. The 4 functional metrics write to their tagged hG guide's
+// `v` (single source of truth); x-height/advance/sidebearing write to `metrics`.
 document.querySelectorAll('.mnum').forEach(inp=>{
-  inp.addEventListener('change', ()=>{ pushHistory(); metrics[inp.dataset.m]=+inp.value||0; renderAll(); scheduleSave(); });
+  inp.addEventListener('change', ()=>{ pushHistory();
+    const k=inp.dataset.m, val=+inp.value||0;
+    if(METRIC_SENTINEL.hasOwnProperty(k)){ const g=hG.find(g=>g.metric===k); if(g) g.v=val; }
+    else metrics[k]=val;
+    renderAll(); scheduleSave(); });
 });
-syncMetricUI();
 
 // ---- sample strip: live merged-outline specimen ----------------------------
 // Returns an array of SVG path-data strings for the named character's merged
@@ -1141,7 +1186,7 @@ function glyphRings(ch){
 // nonzero fill needs to punch counters (e.g. the bowl of 'o'/'a').
 function buildFont(){
   if(typeof opentype==='undefined'){ alert('opentype.js not loaded (needs network).'); return null; }
-  const UPM=1000, base=metrics.baseline, capH=Math.max(1, base-metrics.cap);
+  const UPM=1000, base=metricY('baseline'), capH=Math.max(1, base-metricY('cap'));
   const s=UPM/capH;                                   // canvas units -> em units
   const X=x=>x*s, Y=y=>(base-y)*s;                    // flip Y so up is positive em
   const glyphs=[ new opentype.Glyph({name:'.notdef', unicode:0, advanceWidth:Math.round(metrics.advance*s), path:new opentype.Path()}) ];
@@ -1158,7 +1203,7 @@ function buildFont(){
   }
   if(glyphs.length<2){ alert('No designed glyphs to export.'); return null; }
   return new opentype.Font({ familyName:'ZType', styleName:'Oblique', unitsPerEm:UPM,
-    ascender:Math.round((base-metrics.ascender)*s), descender:Math.round((base-metrics.descender)*s),
+    ascender:Math.round((base-metricY('ascender'))*s), descender:Math.round((base-metricY('descender'))*s),
     glyphs });
 }
 document.getElementById('exportotf').onclick=()=>{ const f=buildFont(); if(f) f.download('ZType-Oblique.otf'); };
@@ -1172,7 +1217,8 @@ function renderSample(){
   const sz    = +document.getElementById('sampleSize').value;   // slider 20..160
 
   // canvas y range we want to show: ascender (top) through descender (bottom)
-  const fullH = metrics.descender - metrics.ascender;   // full canvas height in canvas units
+  const ascY = metricY('ascender'), descY = metricY('descender');
+  const fullH = descY - ascY;   // full canvas height in canvas units
 
   // size slider: maps 20..160 onto viewBox heights.
   // sz=80 (midpoint) -> show fullH (natural fit).
@@ -1197,7 +1243,7 @@ function renderSample(){
   }
 
   const totalW = penX + metrics.sidebearing;
-  svgS.setAttribute('viewBox', '0 '+metrics.ascender+' '+Math.max(totalW,1)+' '+viewH);
+  svgS.setAttribute('viewBox', '0 '+ascY+' '+Math.max(totalW,1)+' '+viewH);
   svgS.setAttribute('preserveAspectRatio', 'xMinYMid meet');
 }
 
@@ -1206,7 +1252,10 @@ document.getElementById('sampleText').addEventListener('input',  renderSample);
 document.getElementById('sampleSize').addEventListener('input',  renderSample);
 document.getElementById('sampleTrack').addEventListener('input', renderSample);
 
-loadStore();        // rehydrate before the first paint
+// Boot: rehydrate (which migrates metric guides into hG via applyProject) or, on a fresh
+// start with no save, seed the 4 metric guides into hG with defaults + sentinel ids.
+if(!loadStore()) ensureMetricGuides();
+syncMetricUI();
 renderAll();
 </script>
 </body>
