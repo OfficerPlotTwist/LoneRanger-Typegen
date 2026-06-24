@@ -51,6 +51,8 @@
   .node{fill:#fff;opacity:.55;pointer-events:none}
   .cell{fill:var(--fill)}
   .cell.sel{stroke:var(--accent);stroke-width:5;paint-order:stroke}
+  .chandle{fill:#000;stroke:var(--accent);stroke-width:2}
+  .chandle.on{fill:var(--accent)}
   .trace{fill:none;stroke:#3ba0ff;stroke-width:2;opacity:.5;pointer-events:none}
   kbd{background:#222;border:1px solid #444;border-radius:4px;padding:0 4px;font-size:10px}
 </style>
@@ -66,6 +68,7 @@
       <button id="m-addd"  class="mode diag">＋ ◹ angled</button>
       <button id="m-fill"  class="mode">▰ Fill cell</button>
       <button id="m-erase" class="mode">▱ Erase</button>
+      <button id="m-round" class="mode">◜ Round corner</button>
       <button id="m-pan"   class="mode">✋ Pan</button>
     </div>
     <div class="grp">
@@ -134,6 +137,12 @@
     </div>
     <div class="grp">
       <label>min gap <input id="mingap" type="number" min="0" step="1" style="width:54px"></label>
+    </div>
+    <div class="grp" id="cornerbar">
+      <label>&#8988; <input class="cnum" data-c="tl" type="range" min="0" max="300" value="60" style="width:56px" title="top-left radius"></label>
+      <label>&#8989; <input class="cnum" data-c="tr" type="range" min="0" max="300" value="60" style="width:56px" title="top-right radius"></label>
+      <label>&#8990; <input class="cnum" data-c="bl" type="range" min="0" max="300" value="60" style="width:56px" title="bottom-left radius"></label>
+      <label>&#8991; <input class="cnum" data-c="br" type="range" min="0" max="300" value="60" style="width:56px" title="bottom-right radius"></label>
     </div>
   </div>
 
@@ -318,7 +327,8 @@ function snapshot(){
   for(const [c,g] of GLYPHS) glyphs[c]=JSON.parse(JSON.stringify(g));
   return { hG:JSON.parse(JSON.stringify(hG)), oG:JSON.parse(JSON.stringify(oG)),
            dG:JSON.parse(JSON.stringify(dG)), dAngle, K, oAngle, nextId, glyphs,
-           metrics:JSON.parse(JSON.stringify(metrics)), minGap };
+           metrics:JSON.parse(JSON.stringify(metrics)), minGap,
+           cornerRadius:JSON.parse(JSON.stringify(cornerRadius)) };
 }
 function pushHistory(){ history.push(snapshot()); if(history.length>200) history.shift(); }
 function undo(){
@@ -327,9 +337,10 @@ function undo(){
   hG=s.hG; oG=s.oG; dG=s.dG; dAngle=s.dAngle; K=s.K; oAngle=s.oAngle; nextId=s.nextId;
   if(s.metrics) Object.assign(metrics, s.metrics);
   if(typeof s.minGap==='number') minGap=s.minGap;
+  if(s.cornerRadius) Object.assign(cornerRadius, s.cornerRadius);
   GLYPHS.clear(); for(const c in s.glyphs) GLYPHS.set(c, s.glyphs[c]);
   for(const e of editors) e.clearSelection();
-  syncAngleUI(); syncObliqueUI(); updateSlope(); syncMetricUI(); syncGapUI(); renderAll(); scheduleSave();
+  syncAngleUI(); syncObliqueUI(); updateSlope(); syncMetricUI(); syncGapUI(); syncCornerUI(); renderAll(); scheduleSave();
 }
 
 const SNAP = 8;               // px snap radius to nice grid
@@ -377,6 +388,46 @@ function cellRings(cell,eff){
   const c=corners(cell,eff); return c?[c]:null;
 }
 const ringPath=r=>'M'+r.map(p=>p.map(n=>+n.toFixed(2)).join(' ')).join(' L ')+' Z';
+
+// ---- corner rounding ---------------------------------------------------------
+// Global radius BY CORNER POSITION (canvas units). A rounded vertex picks its radius
+// by classifying the vertex against its cell's centroid (y<cy=top, x<cx=left).
+const cornerRadius={tl:60,tr:60,bl:60,br:60};
+function classifyCorner(p,c){ return (p[1]<c[1]?'t':'b') + (p[0]<c[0]?'l':'r'); } // -> 'tl'|'tr'|'bl'|'br'
+function centroidOf(ring){ let x=0,y=0; for(const p of ring){x+=p[0];y+=p[1];} return [x/ring.length,y/ring.length]; }
+// rounding ELIGIBLE only for single-ring fill cells (guide-bound or free). Compound/glyph
+// cells (.rings) NEVER round -> null. Otherwise the set of rounded corner INDICES (may be empty).
+function cellRoundedSet(cell){
+  if(cell.rings) return null;
+  return Array.isArray(cell.rounded) ? new Set(cell.rounded) : new Set();
+}
+// quadratic-Bézier fillet builder. Empty/null set -> identical to ringPath(ring).
+function cornerPathStr(ring, rounded){
+  if(!rounded || !rounded.size) return ringPath(ring);
+  const c=centroidOf(ring), n=ring.length;
+  const sub=(a,b)=>[a[0]-b[0],a[1]-b[1]], add=(a,b)=>[a[0]+b[0],a[1]+b[1]],
+        mul=(a,s)=>[a[0]*s,a[1]*s], len=a=>Math.hypot(a[0],a[1]);
+  const unit=a=>{const L=len(a)||1;return [a[0]/L,a[1]/L];};
+  const seg=[];
+  for(let i=0;i<n;i++){
+    const cur=ring[i], prev=ring[(i-1+n)%n], next=ring[(i+1)%n];
+    if(rounded.has(i)){
+      const r=cornerRadius[classifyCorner(cur,c)];
+      const t=Math.min(r, 0.5*len(sub(prev,cur)), 0.5*len(sub(next,cur)));
+      const pin=add(cur,mul(unit(sub(prev,cur)),t)), pout=add(cur,mul(unit(sub(next,cur)),t));
+      seg.push({pin,cur,pout,round:true});
+    } else seg.push({cur,round:false});
+  }
+  const fix=p=>p.map(v=>+v.toFixed(2));
+  let start = seg[0].round ? seg[0].pin : seg[0].cur;
+  let d='M'+fix(start).join(' ');
+  for(let i=0;i<n;i++){ const s=seg[i];
+    if(s.round) d+=' L'+fix(s.pin).join(' ')+' Q'+fix(s.cur).join(' ')+' '+fix(s.pout).join(' ');
+    else d+=' L'+fix(s.cur).join(' ');
+  }
+  return d+' Z';
+}
+function syncCornerUI(){ document.querySelectorAll('.cnum').forEach(inp=>{ inp.value=cornerRadius[inp.dataset.c]; }); }
 
 // delete a guide, then refresh every panel. `g` is the panel's active glyph (so a delete
 // inside a DETACHED glyph is scoped to its private base/extra copies and never touches the
@@ -566,8 +617,25 @@ function Editor(host){
     const cs=cells();
     clear(gFills);
     for(let j=0;j<cs.length;j++){
-      const d=cellRings(cs[j],EFF).map(ringPath).join(' ');   // evenodd => counters/holes punch through
+      const cell=cs[j], rings=cellRings(cell,EFF);
+      const rs=cellRoundedSet(cell);  // null for compound/glyph cells (never rounded)
+      // single-ring fill cells route through the rounded builder (sharp when set is empty);
+      // multi-ring/compound cells stay byte-identical via ringPath.
+      const d = (rs && rings.length===1) ? cornerPathStr(rings[0], rs)
+                                         : rings.map(ringPath).join(' ');   // evenodd => counters/holes punch through
       gFills.appendChild(svgEl('path',{d,'fill-rule':'evenodd',class:'cell'+(selected.has(j)?' sel':'')}));
+    }
+    // round-mode corner handles: hollow=sharp, filled=rounded. Eligible single-ring fill cells only.
+    if(mode==='round'){
+      for(let j=0;j<cs.length;j++){
+        const cell=cs[j], rs=cellRoundedSet(cell); if(!rs) continue;   // skip compound/glyph cells
+        const rings=cellRings(cell,EFF); if(!rings || rings.length!==1) continue;
+        const ring=rings[0];
+        for(let k=0;k<ring.length;k++){
+          gFills.appendChild(svgEl('circle',{cx:ring[k][0],cy:ring[k][1],r:7,
+            class:'chandle'+(rs.has(k)?' on':'')}));
+        }
+      }
     }
     // guides (draw the effective set: shared + any local-extra of a split glyph)
     clear(gGuides);
@@ -668,6 +736,7 @@ function Editor(host){
     else if(mode==='addd'){ pushHistory(); addGuide(glyphOf(ch),'d',snapX(p.x)); renderAll(); scheduleSave(); }
     else if(mode==='fill'){ toggleCell(p); }
     else if(mode==='erase'){ eraseAt(p); }
+    else if(mode==='round'){ roundAt(p); }
     else if(mode==='move'){ selectAt(p, e.shiftKey); }
   });
 
@@ -703,6 +772,27 @@ function Editor(host){
   function eraseAt(p){
     const k=cellAt(p); if(k>=0){ pushHistory(); cells().splice(k,1); selected.clear(); scheduleSave(); }
     renderAll();
+  }
+  // round mode: toggle the nearest eligible cell-corner (within ~14 units) sharp<->rounded.
+  function roundAt(p){
+    const cs=cells(), EFF=effGuides(glyphOf(ch));
+    let best=null, bd=14*14;   // squared distance threshold
+    for(let k=0;k<cs.length;k++){
+      const cell=cs[k]; if(cell.rings) continue;   // compound/glyph cells never round
+      const rings=cellRings(cell,EFF); if(!rings || rings.length!==1) continue;
+      const ring=rings[0];
+      for(let v=0;v<ring.length;v++){
+        const dx=ring[v][0]-p.x, dy=ring[v][1]-p.y, d2=dx*dx+dy*dy;
+        if(d2<bd){ bd=d2; best={k,v}; }
+      }
+    }
+    if(!best) return;
+    pushHistory();
+    const cell=cs[best.k];
+    if(!Array.isArray(cell.rounded)) cell.rounded=[];
+    const at=cell.rounded.indexOf(best.v);
+    if(at>=0) cell.rounded.splice(at,1); else cell.rounded.push(best.v);
+    renderAll(); scheduleSave();
   }
   function selectAt(p, additive){
     const k=cellAt(p);
@@ -800,8 +890,8 @@ function freezeCellList(arr,eff){ return arr.map(c=> c.rings?c : (corners(c,eff)
 function freezeCells(){ for(const g of GLYPHS.values()) g.cells = freezeCellList(g.cells, effGuides(g)); }
 
 // ---- toolbar wiring ----
-const modes={ 'm-move':'move','m-addh':'addh','m-addo':'addo','m-addd':'addd','m-fill':'fill','m-erase':'erase','m-pan':'pan' };
-const mlabel={move:'move/drag',addh:'add ‖ guide',addo:'add ╱ guide',addd:'add ◹ angled guide',fill:'fill cell',erase:'erase',pan:'pan'};
+const modes={ 'm-move':'move','m-addh':'addh','m-addo':'addo','m-addd':'addd','m-fill':'fill','m-erase':'erase','m-round':'round','m-pan':'pan' };
+const mlabel={move:'move/drag',addh:'add ‖ guide',addo:'add ╱ guide',addd:'add ◹ angled guide',fill:'fill cell',erase:'erase',round:'round corner',pan:'pan'};
 for(const id in modes){
   document.getElementById(id).addEventListener('click',()=>{
     mode=modes[id];
@@ -809,6 +899,7 @@ for(const id in modes){
     document.getElementById(id).classList.add('on');
     document.getElementById('mname').textContent=mlabel[mode];
     editors.forEach(ed=>ed.setCursor(mode==='pan'?'grab':'crosshair'));
+    renderAll();   // round-mode corner handles are drawn by render() -> refresh so they toggle on/off
   });
 }
 // global zoom/fit toolbar buttons act on whichever panel the pointer last entered
@@ -1128,7 +1219,7 @@ document.getElementById('placefont').onclick=()=>{
 function serializeStore(){
   const glyphs={};
   for(const [c,g] of GLYPHS) glyphs[c]={cells:g.cells, split:g.split, detached:g.detached, localGuides:g.localGuides};
-  return {v:1, K, oAngle, dAngle, hG, oG, dG, nextId, glyphs, metrics, minGap};
+  return {v:1, K, oAngle, dAngle, hG, oG, dG, nextId, glyphs, metrics, minGap, cornerRadius};
 }
 let _saveT=null;
 function scheduleSave(){ clearTimeout(_saveT); _saveT=setTimeout(saveStore, 400); }
@@ -1146,10 +1237,11 @@ function applyProject(p){       // also reused by Task 8 JSON import
   // defaults). Idempotent: ensureMetricGuides never duplicates an already-present key.
   ensureMetricGuides(p.metrics);
   if(typeof p.minGap==='number') minGap=p.minGap;
+  if(p.cornerRadius) Object.assign(cornerRadius, p.cornerRadius);
   GLYPHS.clear();
   for(const c in p.glyphs){ const g=p.glyphs[c];
     GLYPHS.set(c,{cells:g.cells||[], split:!!g.split, detached:!!g.detached, localGuides:g.localGuides||null}); }
-  syncObliqueUI(); syncAngleUI(); updateSlope(); syncMetricUI(); syncGapUI();
+  syncObliqueUI(); syncAngleUI(); updateSlope(); syncMetricUI(); syncGapUI(); syncCornerUI();
 }
 
 // metric numeric input wiring. The 4 functional metrics write to their tagged hG guide's
@@ -1165,6 +1257,12 @@ document.querySelectorAll('.mnum').forEach(inp=>{
 document.getElementById('mingap').addEventListener('change', e=>{
   pushHistory(); minGap=Math.max(0,+e.target.value||0); syncGapUI(); renderAll(); scheduleSave();
 });
+// corner-radius sliders: live-update on input; snapshot ONCE at drag start (pointerdown) so a
+// whole slider drag undoes as a single step (mirrors the angle/oblique slider pattern).
+document.querySelectorAll('.cnum').forEach(inp=>{
+  inp.addEventListener('pointerdown', ()=>pushHistory());
+  inp.addEventListener('input', e=>{ cornerRadius[inp.dataset.c]=+e.target.value; renderAll(); scheduleSave(); });
+});
 
 // ---- sample strip: live merged-outline specimen ----------------------------
 // Returns an array of SVG path-data strings for the named character's merged
@@ -1175,20 +1273,25 @@ document.getElementById('mingap').addEventListener('change', e=>{
 // paths: array of SVG path-data strings in canvas coords.
 // minX:  minimum x value across all outline points (used for x-normalization).
 // Returns {paths:[], minX:0} for undesigned / empty glyphs.
+function glyphHasRounding(g){ return g.cells.some(c=>!c.rings && Array.isArray(c.rounded) && c.rounded.length); }
 function glyphOutlineData(ch){
   const g = GLYPHS.get(ch);
   if(!g || !g.cells.length) return {paths:[], minX:0};
   const eff = effGuides(g);          // this glyph's effective guide set
-  const simple = [], compound = [];
+  const simple = [], simpleCells = [], compound = [];
   const allRings = [];
   for(const c of g.cells){
     const r = cellRings(c, eff);
     if(!r) continue;
     allRings.push(...r);
     if(r.length > 1) compound.push(r);   // multi-ring cell (holes / glyph cell)
-    else             simple.push(r[0]);   // single-ring cell -> eligible for edge-merge
+    else { simple.push(r[0]); simpleCells.push(c); }   // single-ring cell
   }
-  const paths = mergedPaths(simple).slice();                  // fuse adjacent simple cells
+  // Un-rounded glyphs keep the byte-identical edge-merge; once a glyph has ANY rounded corner,
+  // emit each simple cell as its own (rounded) contour so the fillet survives.
+  const paths = glyphHasRounding(g)
+    ? simple.map((r,k)=>cornerPathStr(r, cellRoundedSet(simpleCells[k])))
+    : mergedPaths(simple).slice();                  // fuse adjacent simple cells
   for(const r of compound) paths.push(r.map(loopPath).join(' '));  // compound cells verbatim
   // compute minX across all ring points so callers can x-normalize the glyph
   let minX = Infinity;
@@ -1296,6 +1399,7 @@ if(!loadStore()) ensureMetricGuides();
 if(minGap < 0) minGap = Math.max(1, (metricY('baseline') - metricY('cap')) / 16);
 syncMetricUI();
 syncGapUI();
+syncCornerUI();
 renderAll();
 </script>
 </body>
