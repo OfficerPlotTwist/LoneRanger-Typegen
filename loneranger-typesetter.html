@@ -1450,19 +1450,39 @@ function buildFont(){
   const glyphs=[ new opentype.Glyph({name:'.notdef', unicode:0, advanceWidth:Math.round(metrics.advance*s), path:new opentype.Path()}) ];
   for(const [ch,g] of GLYPHS){
     const rings=glyphRings(ch); if(!rings.length) continue;
+    // Per-glyph spacing (SAME glyphSpacing the sample strip uses, so the installed font
+    // matches the specimen). xoff shifts the glyph so its left ink lands at LSB; advanceWidth
+    // = lsb+inkWidth+rsb (em). GX is a per-glyph X transform; Y is unchanged.
+    const sp=glyphSpacing(ch);
+    const xoff = sp.empty ? 0 : (sp.lsb - sp.ink.minx);
+    const GX = x => (x + xoff)*s;
+    const advanceWidth = Math.round((sp.empty?metrics.advance:sp.advance)*s);
     const path=new opentype.Path();
     for(const lp of rings){ if(lp.length<3) continue;
-      path.moveTo(X(lp[0][0]), Y(lp[0][1]));
-      for(let i=1;i<lp.length;i++) path.lineTo(X(lp[i][0]), Y(lp[i][1]));
+      path.moveTo(GX(lp[0][0]), Y(lp[0][1]));
+      for(let i=1;i<lp.length;i++) path.lineTo(GX(lp[i][0]), Y(lp[i][1]));
       path.close();
     }
-    glyphs.push(new opentype.Glyph({ name:ch, unicode:ch.codePointAt(0),
-      advanceWidth:Math.round(metrics.advance*s), path }));
+    glyphs.push(new opentype.Glyph({ name:ch, unicode:ch.codePointAt(0), advanceWidth, path }));
   }
   if(glyphs.length<2){ alert('No designed glyphs to export.'); return null; }
-  return new opentype.Font({ familyName:'ZType', styleName:'Oblique', unitsPerEm:UPM,
+  const font=new opentype.Font({ familyName:'ZType', styleName:'Oblique', unitsPerEm:UPM,
     ascender:Math.round((base-metricY('ascender'))*s), descender:Math.round((base-metricY('descender'))*s),
     glyphs });
+  // Best-effort kern: map char-pair `kerning` -> glyph-index pairs in em units and set
+  // font.kerningPairs (opentype READS this; its 1.3.4 WRITER does NOT emit a `kern` table,
+  // so pairs likely will NOT survive in the .otf — kerning is also persisted in-app/JSON).
+  // Wrapped so a failure NEVER blocks the download. Never throws, never blocks.
+  try{
+    const idx={}; glyphs.forEach((gl,n)=>{ if(gl.unicode) idx[String.fromCodePoint(gl.unicode)]=n; });
+    const pairs={};
+    for(const k in kerning){ const L=idx[k[0]], R=idx[k[1]]; if(L!=null&&R!=null) pairs[L+','+R]=Math.round(kerning[k]*s); }
+    if(Object.keys(pairs).length){
+      font.kerningPairs=pairs;
+      console.info('[buildFont] '+Object.keys(pairs).length+' kern pair(s) set on font.kerningPairs, but opentype.js 1.3.4 does not write a kern table — verify the exported .otf; kerning is preserved in-app and in the JSON project.');
+    }
+  }catch(e){ /* kerning stays in-app/JSON only; never block export */ }
+  return font;
 }
 document.getElementById('exportotf').onclick=()=>{ const f=buildFont(); if(f) f.download('ZType-Oblique.otf'); };
 
