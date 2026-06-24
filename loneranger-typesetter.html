@@ -144,6 +144,12 @@
       <label>&#8990; <input class="cnum" data-c="bl" type="range" min="0" max="300" value="60" style="width:56px" title="bottom-left radius"></label>
       <label>&#8991; <input class="cnum" data-c="br" type="range" min="0" max="300" value="60" style="width:56px" title="bottom-right radius"></label>
     </div>
+    <div class="grp" id="shapebar">
+      <label>&#8988;&#8728; <input class="snum" data-c="tl" type="range" min="0" max="1" step="0.01" value="0.5" style="width:56px" title="top-left shape: 0 bevel ↔ 1 fill"></label>
+      <label>&#8989;&#8728; <input class="snum" data-c="tr" type="range" min="0" max="1" step="0.01" value="0.5" style="width:56px" title="top-right shape: 0 bevel ↔ 1 fill"></label>
+      <label>&#8990;&#8728; <input class="snum" data-c="bl" type="range" min="0" max="1" step="0.01" value="0.5" style="width:56px" title="bottom-left shape: 0 bevel ↔ 1 fill"></label>
+      <label>&#8991;&#8728; <input class="snum" data-c="br" type="range" min="0" max="1" step="0.01" value="0.5" style="width:56px" title="bottom-right shape: 0 bevel ↔ 1 fill"></label>
+    </div>
   </div>
 
   <div id="panels">
@@ -328,7 +334,8 @@ function snapshot(){
   return { hG:JSON.parse(JSON.stringify(hG)), oG:JSON.parse(JSON.stringify(oG)),
            dG:JSON.parse(JSON.stringify(dG)), dAngle, K, oAngle, nextId, glyphs,
            metrics:JSON.parse(JSON.stringify(metrics)), minGap,
-           cornerRadius:JSON.parse(JSON.stringify(cornerRadius)) };
+           cornerRadius:JSON.parse(JSON.stringify(cornerRadius)),
+           cornerShape:JSON.parse(JSON.stringify(cornerShape)) };
 }
 function pushHistory(){ history.push(snapshot()); if(history.length>200) history.shift(); }
 function undo(){
@@ -338,6 +345,7 @@ function undo(){
   if(s.metrics) Object.assign(metrics, s.metrics);
   if(typeof s.minGap==='number') minGap=s.minGap;
   if(s.cornerRadius) Object.assign(cornerRadius, s.cornerRadius);
+  if(s.cornerShape) Object.assign(cornerShape, s.cornerShape);
   GLYPHS.clear(); for(const c in s.glyphs) GLYPHS.set(c, s.glyphs[c]);
   for(const e of editors) e.clearSelection();
   syncAngleUI(); syncObliqueUI(); updateSlope(); syncMetricUI(); syncGapUI(); syncCornerUI(); renderAll(); scheduleSave();
@@ -393,6 +401,10 @@ const ringPath=r=>'M'+r.map(p=>p.map(n=>+n.toFixed(2)).join(' ')).join(' L ')+' 
 // Global radius BY CORNER POSITION (canvas units). A rounded vertex picks its radius
 // by classifying the vertex against its cell's centroid (y<cy=top, x<cx=left).
 const cornerRadius={tl:60,tr:60,bl:60,br:60};
+// shape 0..1 per corner position: 0 = flat bevel (chamfer), 0.5 = circular-ish round
+// (control at the corner vertex — the original look), 1 = curve apex reaches the vertex
+// (corner filled to its full extent). Control point C = M + 2s·(cur−M), M = chord midpoint.
+const cornerShape={tl:0.5,tr:0.5,bl:0.5,br:0.5};
 function classifyCorner(p,c){ return (p[1]<c[1]?'t':'b') + (p[0]<c[0]?'l':'r'); } // -> 'tl'|'tr'|'bl'|'br'
 function centroidOf(ring){ let x=0,y=0; for(const p of ring){x+=p[0];y+=p[1];} return [x/ring.length,y/ring.length]; }
 // rounding ELIGIBLE only for single-ring fill cells (guide-bound or free). Compound/glyph
@@ -412,17 +424,19 @@ function cornerPathStr(ring, rounded){
   for(let i=0;i<n;i++){
     const cur=ring[i], prev=ring[(i-1+n)%n], next=ring[(i+1)%n];
     if(rounded.has(i)){
-      const r=cornerRadius[classifyCorner(cur,c)];
+      const pos=classifyCorner(cur,c);
+      const r=cornerRadius[pos];
       const t=Math.min(r, 0.5*len(sub(prev,cur)), 0.5*len(sub(next,cur)));
       const pin=add(cur,mul(unit(sub(prev,cur)),t)), pout=add(cur,mul(unit(sub(next,cur)),t));
-      seg.push({pin,cur,pout,round:true});
+      const M=mul(add(pin,pout),0.5), ctrl=add(M, mul(sub(cur,M), 2*cornerShape[pos]));
+      seg.push({pin,ctrl,pout,round:true});
     } else seg.push({cur,round:false});
   }
   const fix=p=>p.map(v=>+v.toFixed(2));
   let start = seg[0].round ? seg[0].pin : seg[0].cur;
   let d='M'+fix(start).join(' ');
   for(let i=0;i<n;i++){ const s=seg[i];
-    if(s.round) d+=' L'+fix(s.pin).join(' ')+' Q'+fix(s.cur).join(' ')+' '+fix(s.pout).join(' ');
+    if(s.round) d+=' L'+fix(s.pin).join(' ')+' Q'+fix(s.ctrl).join(' ')+' '+fix(s.pout).join(' ');
     else d+=' L'+fix(s.cur).join(' ');
   }
   return d+' Z';
@@ -439,17 +453,22 @@ function cornerLoopPts(ring, rounded, steps=8){
   for(let i=0;i<n;i++){
     const cur=ring[i], prev=ring[(i-1+n)%n], next=ring[(i+1)%n];
     if(rounded.has(i)){
-      const r=cornerRadius[classifyCorner(cur,c)];
+      const pos=classifyCorner(cur,c);
+      const r=cornerRadius[pos];
       const t=Math.min(r,0.5*len(sub(prev,cur)),0.5*len(sub(next,cur)));
       const pin=add(cur,mul(unit(sub(prev,cur)),t)), pout=add(cur,mul(unit(sub(next,cur)),t));
+      const M=mul(add(pin,pout),0.5), ctrl=add(M, mul(sub(cur,M), 2*cornerShape[pos]));
       out.push(pin);
-      for(let k=1;k<=steps;k++){ const u=k/steps, mt=1-u;            // quadratic Bézier pin->cur->pout
-        out.push([mt*mt*pin[0]+2*mt*u*cur[0]+u*u*pout[0], mt*mt*pin[1]+2*mt*u*cur[1]+u*u*pout[1]]); }
+      for(let k=1;k<=steps;k++){ const u=k/steps, mt=1-u;            // quadratic Bézier pin->ctrl->pout
+        out.push([mt*mt*pin[0]+2*mt*u*ctrl[0]+u*u*pout[0], mt*mt*pin[1]+2*mt*u*ctrl[1]+u*u*pout[1]]); }
     } else out.push(cur);
   }
   return out;
 }
-function syncCornerUI(){ document.querySelectorAll('.cnum').forEach(inp=>{ inp.value=cornerRadius[inp.dataset.c]; }); }
+function syncCornerUI(){
+  document.querySelectorAll('.cnum').forEach(inp=>{ inp.value=cornerRadius[inp.dataset.c]; });
+  document.querySelectorAll('.snum').forEach(inp=>{ inp.value=cornerShape[inp.dataset.c]; });
+}
 
 // delete a guide, then refresh every panel. `g` is the panel's active glyph (so a delete
 // inside a DETACHED glyph is scoped to its private base/extra copies and never touches the
@@ -1266,7 +1285,7 @@ document.getElementById('placefont').onclick=()=>{
 function serializeStore(){
   const glyphs={};
   for(const [c,g] of GLYPHS) glyphs[c]={cells:g.cells, split:g.split, detached:g.detached, localGuides:g.localGuides};
-  return {v:1, K, oAngle, dAngle, hG, oG, dG, nextId, glyphs, metrics, minGap, cornerRadius};
+  return {v:1, K, oAngle, dAngle, hG, oG, dG, nextId, glyphs, metrics, minGap, cornerRadius, cornerShape};
 }
 let _saveT=null;
 function scheduleSave(){ clearTimeout(_saveT); _saveT=setTimeout(saveStore, 400); }
@@ -1285,6 +1304,7 @@ function applyProject(p){       // also reused by Task 8 JSON import
   ensureMetricGuides(p.metrics);
   if(typeof p.minGap==='number') minGap=p.minGap;
   if(p.cornerRadius) Object.assign(cornerRadius, p.cornerRadius);
+  if(p.cornerShape) Object.assign(cornerShape, p.cornerShape);
   GLYPHS.clear();
   for(const c in p.glyphs){ const g=p.glyphs[c];
     GLYPHS.set(c,{cells:g.cells||[], split:!!g.split, detached:!!g.detached, localGuides:g.localGuides||null}); }
@@ -1309,6 +1329,11 @@ document.getElementById('mingap').addEventListener('change', e=>{
 document.querySelectorAll('.cnum').forEach(inp=>{
   inp.addEventListener('pointerdown', ()=>pushHistory());
   inp.addEventListener('input', e=>{ cornerRadius[inp.dataset.c]=+e.target.value; renderAll(); scheduleSave(); });
+});
+// corner-shape sliders (bevel↔fill), same one-snapshot-per-drag pattern as radius.
+document.querySelectorAll('.snum').forEach(inp=>{
+  inp.addEventListener('pointerdown', ()=>pushHistory());
+  inp.addEventListener('input', e=>{ cornerShape[inp.dataset.c]=+e.target.value; renderAll(); scheduleSave(); });
 });
 
 // ---- sample strip: live merged-outline specimen ----------------------------
