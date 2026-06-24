@@ -1056,20 +1056,34 @@ syncMetricUI();
 // outline in canvas coordinates.  Uses each glyph's own effective guides so
 // split/detached glyphs render correctly (their outline matches the panel view).
 // Returns [] for undesigned / empty glyphs.
-function glyphOutlinePaths(ch){
+// Returns {paths, minX} for the named character.
+// paths: array of SVG path-data strings in canvas coords.
+// minX:  minimum x value across all outline points (used for x-normalization).
+// Returns {paths:[], minX:0} for undesigned / empty glyphs.
+function glyphOutlineData(ch){
   const g = GLYPHS.get(ch);
-  if(!g || !g.cells.length) return [];
+  if(!g || !g.cells.length) return {paths:[], minX:0};
   const eff = effGuides(g);          // this glyph's effective guide set
   const simple = [], compound = [];
+  const allRings = [];
   for(const c of g.cells){
     const r = cellRings(c, eff);
     if(!r) continue;
+    allRings.push(...r);
     if(r.length > 1) compound.push(r);   // multi-ring cell (holes / glyph cell)
     else             simple.push(r[0]);   // single-ring cell -> eligible for edge-merge
   }
-  const out = mergedPaths(simple).slice();                  // fuse adjacent simple cells
-  for(const r of compound) out.push(r.map(loopPath).join(' '));  // compound cells verbatim
-  return out;
+  const paths = mergedPaths(simple).slice();                  // fuse adjacent simple cells
+  for(const r of compound) paths.push(r.map(loopPath).join(' '));  // compound cells verbatim
+  // compute minX across all ring points so callers can x-normalize the glyph
+  let minX = Infinity;
+  for(const ring of allRings) for(const pt of ring) if(pt[0] < minX) minX = pt[0];
+  if(!isFinite(minX)) minX = 0;
+  return {paths, minX};
+}
+
+function glyphOutlinePaths(ch){
+  return glyphOutlineData(ch).paths;
 }
 
 function renderSample(){
@@ -1097,9 +1111,10 @@ function renderSample(){
 
   for(const chr of text){
     if(chr === ' '){ penX += metrics.advance * 0.5 + track; continue; }
-    const paths = glyphOutlinePaths(chr);
+    const {paths, minX} = glyphOutlineData(chr);
+    const tx = penX - minX;   // shift glyph so its own left edge sits at penX
     for(const d of paths){
-      svgS.appendChild(svgEl('path', {d, fill:'#fff', transform:'translate('+penX+' 0)'}));
+      svgS.appendChild(svgEl('path', {d, fill:'#fff', transform:'translate('+tx+' 0)'}));
     }
     penX += metrics.advance + track;
   }
