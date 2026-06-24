@@ -33,9 +33,12 @@
   .panel .pbody{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;overflow:hidden}
   .panel svg{width:100%;height:100%;background:#000;cursor:crosshair;touch-action:none}
   .panel.active{border-color:var(--accent)}
-  #status{padding:6px 10px;background:var(--panel);border-top:1px solid var(--line);
-          color:var(--mut);font-size:11px;display:flex;gap:16px;flex-wrap:wrap}
+  #status{padding:4px 10px;background:var(--panel);border-top:1px solid var(--line);
+          color:var(--mut);font-size:11px;display:flex;gap:12px;flex-wrap:wrap}
   #status b{color:var(--txt)}
+  #sample{display:flex;gap:10px;align-items:center;padding:8px 10px;background:var(--panel);border-top:1px solid var(--line);flex-wrap:wrap}
+  #sampleView{flex-basis:100%;height:120px;background:#000;border:1px solid #1c1c1c;border-radius:6px;overflow:hidden}
+  #sampleSvg{width:100%;height:100%}
   .gline-hit{stroke:transparent;stroke-width:16;cursor:grab}
   .gline-h{stroke:var(--horiz);stroke-width:1.4;pointer-events:none}
   .gline-o{stroke:var(--oblique);stroke-width:1.4;pointer-events:none}
@@ -134,13 +137,19 @@
   </div>
 
   <div id="status">
-    <span>oblique slope dx/dy = <b id="slopeK">-0.7375</b> (<b id="slopeA">53.6&deg;</b> from horizontal)</span>
-    <span>‖ guides: <b id="nH">0</b></span>
-    <span>╱ guides: <b id="nO">0</b></span>
-    <span>filled cells: <b id="nF">0</b></span>
+    <span>slope <b id="slopeK">-0.7375</b> (<b id="slopeA">53.6&deg;</b>)</span>
+    <span>‖ <b id="nH">0</b></span>
+    <span>╱ <b id="nO">0</b></span>
+    <span>cells <b id="nF">0</b></span>
     <span>mode: <b id="mname">move</b></span>
     <span>zoom: <b id="zlbl">100%</b></span>
-    <span style="color:#666">wheel=zoom &middot; middle/Space/Pan=pan &middot; right-click=delete &middot; shift-click=multi-select &middot; Del=remove selected</span>
+    <span style="color:#555">wheel=zoom &middot; mid/Space=pan &middot; right-click=del &middot; shift-click=multi &middot; Del=remove</span>
+  </div>
+  <div id="sample">
+    <input id="sampleText" type="text" value="abcdefghijklmnopqrstuvwxyz" style="flex:1;min-width:120px">
+    <label>size <input id="sampleSize" type="range" min="20" max="160" value="80"></label>
+    <label>track <input id="sampleTrack" type="range" min="-40" max="120" value="0"></label>
+    <div id="sampleView"><svg id="sampleSvg" xmlns="http://www.w3.org/2000/svg"></svg></div>
   </div>
 </div>
 
@@ -667,7 +676,7 @@ function activeEditor(){ return editors[_active]; }
 function activeChar(){ return activeEditor().ch; }
 function activeCells(){ return activeEditor().cells(); }
 function setActiveCells(arr){ activeEditor().setCells(arr); }
-function renderAll(){ for(const e of editors) e.render(); /* sample strip added in Task 7 */ }
+function renderAll(){ for(const e of editors) e.render(); renderSample(); }
 const editors = [...document.querySelectorAll('.panel')].map(Editor);
 setActive(0);
 
@@ -1041,6 +1050,69 @@ document.querySelectorAll('.mnum').forEach(inp=>{
   inp.addEventListener('change', ()=>{ pushHistory(); metrics[inp.dataset.m]=+inp.value||0; renderAll(); scheduleSave(); });
 });
 syncMetricUI();
+
+// ---- sample strip: live merged-outline specimen ----------------------------
+// Returns an array of SVG path-data strings for the named character's merged
+// outline in canvas coordinates.  Uses each glyph's own effective guides so
+// split/detached glyphs render correctly (their outline matches the panel view).
+// Returns [] for undesigned / empty glyphs.
+function glyphOutlinePaths(ch){
+  const g = GLYPHS.get(ch);
+  if(!g || !g.cells.length) return [];
+  const eff = effGuides(g);          // this glyph's effective guide set
+  const simple = [], compound = [];
+  for(const c of g.cells){
+    const r = cellRings(c, eff);
+    if(!r) continue;
+    if(r.length > 1) compound.push(r);   // multi-ring cell (holes / glyph cell)
+    else             simple.push(r[0]);   // single-ring cell -> eligible for edge-merge
+  }
+  const out = mergedPaths(simple).slice();                  // fuse adjacent simple cells
+  for(const r of compound) out.push(r.map(loopPath).join(' '));  // compound cells verbatim
+  return out;
+}
+
+function renderSample(){
+  const svgS = document.getElementById('sampleSvg');
+  while(svgS.firstChild) svgS.removeChild(svgS.firstChild);
+
+  const text  = document.getElementById('sampleText').value;
+  const track = +document.getElementById('sampleTrack').value;
+  const sz    = +document.getElementById('sampleSize').value;   // slider 20..160
+
+  // canvas y range we want to show: ascender (top) through descender (bottom)
+  const fullH = metrics.descender - metrics.ascender;   // full canvas height in canvas units
+
+  // size slider: maps 20..160 onto viewBox heights.
+  // sz=80 (midpoint) -> show fullH (natural fit).
+  // sz>80 -> show less height -> glyphs appear larger.
+  // sz<80 -> show more height -> glyphs appear smaller.
+  // Linear interpolation: at sz=160 show fullH*0.25; at sz=20 show fullH*2.
+  const minH = fullH * 0.25;   // sz=160  (largest)
+  const maxH = fullH * 2.0;    // sz=20   (smallest)
+  const t = (sz - 20) / (160 - 20);   // 0..1
+  const viewH = maxH + t * (minH - maxH);   // lerp from maxH down to minH as sz increases
+
+  let penX = metrics.sidebearing;
+
+  for(const chr of text){
+    if(chr === ' '){ penX += metrics.advance * 0.5 + track; continue; }
+    const paths = glyphOutlinePaths(chr);
+    for(const d of paths){
+      svgS.appendChild(svgEl('path', {d, fill:'#fff', transform:'translate('+penX+' 0)'}));
+    }
+    penX += metrics.advance + track;
+  }
+
+  const totalW = penX + metrics.sidebearing;
+  svgS.setAttribute('viewBox', '0 '+metrics.ascender+' '+Math.max(totalW,1)+' '+viewH);
+  svgS.setAttribute('preserveAspectRatio', 'xMinYMid meet');
+}
+
+// wire sample strip inputs
+document.getElementById('sampleText').addEventListener('input',  renderSample);
+document.getElementById('sampleSize').addEventListener('input',  renderSample);
+document.getElementById('sampleTrack').addEventListener('input', renderSample);
 
 loadStore();        // rehydrate before the first paint
 renderAll();
