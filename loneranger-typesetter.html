@@ -38,7 +38,8 @@
   #status b{color:var(--txt)}
   #sample{display:flex;gap:10px;align-items:center;padding:8px 10px;background:var(--panel);border-top:1px solid var(--line);flex-wrap:wrap}
   #sampleView{flex-basis:100%;height:120px;background:#000;border:1px solid #1c1c1c;border-radius:6px;overflow:hidden}
-  #sampleSvg{width:100%;height:100%}
+  #sampleSvg{width:100%;height:100%;touch-action:none}
+  #sampleSvg:focus{outline:1px solid var(--accent);outline-offset:-1px}
   .gline-hit{stroke:transparent;stroke-width:16;cursor:grab}
   .gline-h{stroke:var(--horiz);stroke-width:1.4;pointer-events:none}
   .gline-o{stroke:var(--oblique);stroke-width:1.4;pointer-events:none}
@@ -171,7 +172,9 @@
     <input id="sampleText" type="text" value="abcdefghijklmnopqrstuvwxyz" style="flex:1;min-width:120px">
     <label>size <input id="sampleSize" type="range" min="20" max="160" value="80"></label>
     <label>track <input id="sampleTrack" type="range" min="-40" max="120" value="0"></label>
-    <div id="sampleView"><svg id="sampleSvg" xmlns="http://www.w3.org/2000/svg"></svg></div>
+    <span id="sampleStatus" style="color:var(--mut);font-size:11px;min-width:160px"></span>
+    <span style="color:#555;font-size:10px">click glyph/gap &middot; <kbd>&larr;</kbd><kbd>&rarr;</kbd> nudge &middot; <kbd>Shift</kbd>=LSB &middot; <kbd>Alt</kbd>=1px &middot; <kbd>Bksp</kbd>=reset</span>
+    <div id="sampleView"><svg id="sampleSvg" xmlns="http://www.w3.org/2000/svg" tabindex="0"></svg></div>
   </div>
 </div>
 
@@ -1425,6 +1428,14 @@ function glyphSpacing(ch){
 // Mutated in place (clear+assign) by persistence so any held reference stays valid.
 const kerning={};
 
+// ---- interactive sample strip (Task 2) -------------------------------------
+// samplePlace: per-glyph placement list in SAMPLE-SVG USER COORDS (same space as the
+// emitted <path> transforms / the viewBox). Rebuilt fresh on every renderSample().
+//   {i, ch, x0:slot start (after kern, before advance), x1:after advance, isEmpty}
+let samplePlace=[];
+// selection: null | {type:'glyph', i, ch} | {type:'pair', left, right}
+let sampleSel=null;
+
 // buildFont: assemble an opentype.Font from every designed glyph.
 // Transform: canvas units -> 1000-upm em, with a Y-flip about the baseline so "up" is
 // positive em. cap line maps to ~UPM, baseline maps to 0. Winding from mergedLoops is
@@ -1478,29 +1489,137 @@ function renderSample(){
 
   let penX = metrics.sidebearing;
   let prev = null;
+  samplePlace = [];   // rebuilt fresh each render
+  let i = 0;
 
   for(const chr of text){
     if(prev !== null) penX += (kerning[prev+chr] || 0);   // pair kern before placing chr
+    const x0 = penX;                                       // slot start (after kern, before advance)
     const sp = glyphSpacing(chr);
-    if(sp.empty){ penX += sp.advance + track; prev = chr; continue; }   // empty -> advance, draw nothing
+    if(sp.empty){
+      penX += sp.advance + track;
+      samplePlace.push({i, ch:chr, x0, x1:penX, isEmpty:true});
+      prev = chr; i++; continue;   // empty -> advance, draw nothing
+    }
     const {paths} = glyphOutlineData(chr);
     const tx = penX + sp.lsb - sp.ink.minx;   // ink left edge sits at penX + lsb
     for(const d of paths){
       svgS.appendChild(svgEl('path', {d, fill:'#fff', transform:'translate('+tx+' 0)'}));
     }
     penX += sp.advance + track;
-    prev = chr;
+    samplePlace.push({i, ch:chr, x0, x1:penX, isEmpty:false});
+    prev = chr; i++;
   }
 
   const totalW = penX + metrics.sidebearing;
   svgS.setAttribute('viewBox', '0 '+ascY+' '+Math.max(totalW,1)+' '+viewH);
   svgS.setAttribute('preserveAspectRatio', 'xMinYMid meet');
+
+  // ---- selection highlight + status line (Task 2) ----
+  const statusEl = document.getElementById('sampleStatus');
+  if(sampleSel && sampleSel.type==='glyph'){
+    // re-resolve placement by index (text may have changed); fall back to clearing.
+    const pl = samplePlace.find(p=>p.i===sampleSel.i && p.ch===sampleSel.ch);
+    if(pl){
+      svgS.appendChild(svgEl('rect', {x:pl.x0, y:ascY, width:Math.max(pl.x1-pl.x0,1), height:viewH,
+        fill:'#4da3ff', 'fill-opacity':'0.18', stroke:'#4da3ff', 'stroke-width':Math.max(viewH/120,2), 'pointer-events':'none'}));
+      const g  = GLYPHS.get(pl.ch);
+      const lsb = (g&&typeof g.lsb==='number')?g.lsb:metrics.sidebearing;
+      const rsb = (g&&typeof g.rsb==='number')?g.rsb:metrics.sidebearing;
+      if(statusEl) statusEl.textContent = pl.ch+'  LSB '+Math.round(lsb)+'  RSB '+Math.round(rsb);
+    } else if(statusEl){ statusEl.textContent=''; }
+  } else if(sampleSel && sampleSel.type==='pair'){
+    // marker at the boundary between the selected left/right glyph boxes (nearest such pair).
+    let bx=null;
+    for(let k=0;k<samplePlace.length-1;k++){
+      if(samplePlace[k].ch===sampleSel.left && samplePlace[k+1].ch===sampleSel.right){
+        bx = (samplePlace[k].x1 + samplePlace[k+1].x0)/2; break;
+      }
+    }
+    if(bx!==null){
+      svgS.appendChild(svgEl('line', {x1:bx, y1:ascY, x2:bx, y2:ascY+viewH,
+        stroke:'#ffd24d', 'stroke-width':Math.max(viewH/60,3), 'pointer-events':'none'}));
+      const v = kerning[sampleSel.left+sampleSel.right] || 0;
+      if(statusEl) statusEl.textContent = 'kern "'+sampleSel.left+sampleSel.right+'" '+Math.round(v);
+    } else if(statusEl){ statusEl.textContent=''; }
+  } else if(statusEl){
+    statusEl.textContent = '';
+  }
 }
 
 // wire sample strip inputs
 document.getElementById('sampleText').addEventListener('input',  renderSample);
 document.getElementById('sampleSize').addEventListener('input',  renderSample);
 document.getElementById('sampleTrack').addEventListener('input', renderSample);
+
+// ---- interactive sample strip: click to select, arrows to nudge (Task 2) ----
+// Click converts to sample-svg USER X via getScreenCTM().inverse() (handles the
+// size-slider viewBox + preserveAspectRatio letterboxing automatically), matching the
+// coords stored in samplePlace. Inside a glyph box [x0,x1] -> glyph select; otherwise the
+// boundary between the two nearest boxes -> pair select.
+(function(){
+  const sampleSvg = document.getElementById('sampleSvg');
+
+  function clientToUserX(evt){
+    const pt = sampleSvg.createSVGPoint();
+    pt.x = evt.clientX; pt.y = evt.clientY;
+    const ctm = sampleSvg.getScreenCTM();
+    if(!ctm) return null;
+    return pt.matrixTransform(ctm.inverse()).x;
+  }
+
+  sampleSvg.addEventListener('pointerdown', (e)=>{
+    if(e.button!==0) return;
+    const ux = clientToUserX(e);
+    sampleSvg.focus();
+    if(ux===null || !samplePlace.length){ sampleSel=null; renderSample(); return; }
+    // 1) inside a glyph box -> glyph select
+    for(const p of samplePlace){
+      if(ux>=p.x0 && ux<=p.x1){ sampleSel={type:'glyph', i:p.i, ch:p.ch}; renderSample(); return; }
+    }
+    // 2) between two boxes -> pair select (need >=2 glyphs). Pick the boundary gap the
+    //    click falls in (or the nearest one), using the surrounding glyph chars.
+    if(samplePlace.length>=2){
+      // before the first / after the last -> clear (no pair to nudge there)
+      if(ux < samplePlace[0].x0 || ux > samplePlace[samplePlace.length-1].x1){ sampleSel=null; renderSample(); return; }
+      let bestK=-1, bestD=Infinity;
+      for(let k=0;k<samplePlace.length-1;k++){
+        const mid=(samplePlace[k].x1 + samplePlace[k+1].x0)/2;
+        const d=Math.abs(ux-mid);
+        if(d<bestD){ bestD=d; bestK=k; }
+      }
+      if(bestK>=0){ sampleSel={type:'pair', left:samplePlace[bestK].ch, right:samplePlace[bestK+1].ch}; renderSample(); return; }
+    }
+    sampleSel=null; renderSample();
+  });
+
+  // keydown lives on #sampleSvg ONLY (never document / never #sampleText), so arrows in the
+  // text field keep moving the caret. It also no-ops unless a selection exists.
+  sampleSvg.addEventListener('keydown', (e)=>{
+    if(!sampleSel) return;
+    const STEP = e.altKey?1:5;
+    let handled=true;
+    if(e.key==='ArrowRight' || e.key==='ArrowLeft'){
+      const dir = e.key==='ArrowRight'?1:-1;
+      pushHistory();
+      if(sampleSel.type==='glyph'){
+        const g=glyphOf(sampleSel.ch);
+        if(e.shiftKey){ g.lsb=(typeof g.lsb==='number'?g.lsb:metrics.sidebearing)+dir*STEP; }
+        else          { g.rsb=(typeof g.rsb==='number'?g.rsb:metrics.sidebearing)+dir*STEP; }
+      } else {
+        const key=sampleSel.left+sampleSel.right;
+        kerning[key]=(kerning[key]||0)+dir*STEP;
+      }
+      renderAll(); scheduleSave();
+    } else if(e.key==='Backspace' || e.key==='Delete'){
+      pushHistory();
+      if(sampleSel.type==='glyph'){ const g=glyphOf(sampleSel.ch); delete g.lsb; delete g.rsb; }
+      else delete kerning[sampleSel.left+sampleSel.right];
+      renderAll(); scheduleSave();
+    } else handled=false;
+    if(handled) e.preventDefault();
+  });
+})();
 
 // Boot: rehydrate (which migrates metric guides into hG via applyProject) or, on a fresh
 // start with no save, seed the 4 metric guides into hG with defaults + sentinel ids.
