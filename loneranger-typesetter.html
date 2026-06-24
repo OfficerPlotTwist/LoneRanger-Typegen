@@ -221,7 +221,9 @@ function glyphOf(ch){
   if(!g){ g={cells:[], split:false, detached:false, localGuides:null}; GLYPHS.set(ch,g); }
   return g;
 }
-const ALPHABET = [...'abcdefghijklmnopqrstuvwxyz0123456789.,!?-'];
+// full designable set: lowercase first (so panels still default to a/b/c), then
+// uppercase, digits, and standard US-keyboard punctuation/symbols (space excluded).
+const ALPHABET = [...'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789`~!@#$%^&*()-_=+[]{}\\|;:\'",.<>/?'];
 let mode = 'move';
 let snap = true;
 
