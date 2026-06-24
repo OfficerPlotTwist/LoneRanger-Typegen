@@ -667,13 +667,11 @@ function Editor(host){
   function syncLetter(){
     // After a project load, re-point this panel's dropdown to its current char and re-render.
     // If ch is not a valid ALPHABET option, keep it selected (the glyph may simply be empty).
-    sel.value = ch;
+    letterSel.value = ch;
     selected.clear();
     syncSplitUI();
     render();
   }
-  // expose sel so syncLetter can reference it; alias to letterSel
-  const sel = letterSel;
   return { el:host, id:i, render, fitView, applyVB, zoomTo:zoomAt, setCursor, _svg:svg,
            get ch(){return ch}, cells, setCells, deleteSelected, clearSelection, syncLetter };
 }
@@ -1002,7 +1000,7 @@ document.getElementById('saveproj').onclick=()=>{
 const pf=document.getElementById('projfile');
 document.getElementById('loadproj').onclick=()=>pf.click();
 pf.onchange=()=>{ const f=pf.files[0]; if(!f) return; const r=new FileReader();
-  r.onload=()=>{ try{ pushHistory(); applyProject(JSON.parse(r.result));
+  r.onload=()=>{ try{ const p=JSON.parse(r.result); pushHistory(); applyProject(p);
     for(const e of editors) e.syncLetter(); renderAll(); scheduleSave(); }
     catch(err){ alert('Bad project file: '+err.message); } pf.value=''; }; r.readAsText(f); };
 
