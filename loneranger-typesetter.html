@@ -798,22 +798,40 @@ function Editor(host){
   // round mode: toggle the nearest eligible cell-corner (within ~14 units) sharp<->rounded.
   function roundAt(p){
     const cs=cells(), EFF=effGuides(glyphOf(ch));
-    let best=null, bd=14*14;   // squared distance threshold
+    // gather every eligible cell corner within the hit threshold of the click
+    const TH=14, cand=[];
     for(let k=0;k<cs.length;k++){
       const cell=cs[k]; if(cell.rings) continue;   // compound/glyph cells never round
       const rings=cellRings(cell,EFF); if(!rings || rings.length!==1) continue;
       const ring=rings[0];
       for(let v=0;v<ring.length;v++){
         const dx=ring[v][0]-p.x, dy=ring[v][1]-p.y, d2=dx*dx+dy*dy;
-        if(d2<bd){ bd=d2; best={k,v}; }
+        if(d2<=TH*TH) cand.push({k,v,pt:ring[v],ring,d2});
       }
     }
-    if(!best) return;
+    if(!cand.length) return;
+    // anchor on the intersection nearest the cursor, then keep only the corners
+    // coincident with it (the cells that all meet at that shared intersection)
+    cand.sort((a,b)=>a.d2-b.d2);
+    const A=cand[0].pt, EPS=4*4;
+    const cluster=cand.filter(c=>{ const dx=c.pt[0]-A[0], dy=c.pt[1]-A[1]; return dx*dx+dy*dy<=EPS; });
+    // disambiguate by quadrant: round the cell whose body extends toward the
+    // cursor's offset from the intersection (max dot of centroid-dir with click-dir)
+    const ux=p.x-A[0], uy=p.y-A[1];
+    let pick=cluster[0];
+    if(cluster.length>1 && (ux||uy)){
+      let bestDot=-Infinity;
+      for(const c of cluster){
+        const cen=centroidOf(c.ring);
+        const dot=(cen[0]-A[0])*ux+(cen[1]-A[1])*uy;
+        if(dot>bestDot){ bestDot=dot; pick=c; }
+      }
+    }
     pushHistory();
-    const cell=cs[best.k];
+    const cell=cs[pick.k];
     if(!Array.isArray(cell.rounded)) cell.rounded=[];
-    const at=cell.rounded.indexOf(best.v);
-    if(at>=0) cell.rounded.splice(at,1); else cell.rounded.push(best.v);
+    const at=cell.rounded.indexOf(pick.v);
+    if(at>=0) cell.rounded.splice(at,1); else cell.rounded.push(pick.v);
     renderAll(); scheduleSave();
   }
   function selectAt(p, additive){
