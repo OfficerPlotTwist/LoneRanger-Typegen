@@ -219,7 +219,7 @@ function syncMetricUI(){ document.querySelectorAll('.mnum').forEach(inp=>{
   inp.value = METRIC_SENTINEL.hasOwnProperty(k) ? metricY(k) : metrics[k];
 }); }
 
-let minGap = 0;   // min pixel gap enforced between guides in the same family during drag
+let minGap = -1;  // min pixel gap enforced between guides in the same family during drag; -1 = uninitialized sentinel
 function syncGapUI(){ const el=document.getElementById('mingap'); if(el) el.value=Math.round(minGap); }
 
 const byId = (arr,id)=>arr.find(g=>g.id===id);
@@ -1293,7 +1293,7 @@ if(!loadStore()) ensureMetricGuides();
 // Initialize minGap AFTER metric guides are seeded (metricY is now valid).
 // applyProject/loadStore will override this if a saved value exists; for fresh starts,
 // default to 1/16 of cap height (baseline - cap) clamped to at least 1px.
-if(minGap===0) minGap = Math.max(1, (metricY('baseline') - metricY('cap')) / 16);
+if(minGap < 0) minGap = Math.max(1, (metricY('baseline') - metricY('cap')) / 16);
 syncMetricUI();
 syncGapUI();
 renderAll();
