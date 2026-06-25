@@ -994,12 +994,29 @@ document.getElementById('zpreset').onclick=loadZPreset;
 document.getElementById('clear').onclick=()=>{pushHistory();setActiveCells([]);activeEditor().clearSelection();renderAll();scheduleSave();};
 addEventListener('keydown',e=>{
   const t=e.target.tagName; if(t==='INPUT'||t==='TEXTAREA') return;
+  // sample-strip spacing/kern nudge: active whenever a strip selection exists (set by clicking
+  // a glyph/gap) and no form field is focused. Lives here (not on #sampleSvg) so it doesn't
+  // depend on the SVG holding focus. Runs BEFORE the editor Delete/undo logic and returns.
+  if(sampleSel && (e.key==='ArrowRight'||e.key==='ArrowLeft')){
+    const dir=e.key==='ArrowRight'?1:-1, STEP=e.altKey?1:5;
+    pushHistory();
+    if(sampleSel.type==='glyph'){ const g=glyphOf(sampleSel.ch);
+      if(e.shiftKey) g.lsb=(typeof g.lsb==='number'?g.lsb:metrics.sidebearing)+dir*STEP;
+      else           g.rsb=(typeof g.rsb==='number'?g.rsb:metrics.sidebearing)+dir*STEP;
+    } else { const k=sampleSel.left+sampleSel.right; kerning[k]=(kerning[k]||0)+dir*STEP; }
+    renderAll(); scheduleSave(); e.preventDefault(); return;
+  }
+  if(sampleSel && (e.key==='Backspace'||e.key==='Delete')){
+    pushHistory();
+    if(sampleSel.type==='glyph'){ const g=glyphOf(sampleSel.ch); delete g.lsb; delete g.rsb; }
+    else delete kerning[sampleSel.left+sampleSel.right];
+    renderAll(); scheduleSave(); e.preventDefault(); return;
+  }
   if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){ e.preventDefault(); undo(); }
   else if(e.key==='Delete'||e.key==='Backspace'){
-    if(e.target.id==='sampleSvg') return;                     // sample strip owns Backspace (resets spacing)
     if(activeEditor().deleteSelected()) e.preventDefault();   // deletes from the active panel's glyph
   }
-  else if(e.key==='Escape'){ activeEditor().clearSelection(); }
+  else if(e.key==='Escape'){ sampleSel=null; activeEditor().clearSelection(); renderSample(); }
 });
 // angle control: number box + slider rotate all angled guides about their center-line pivots
 const angNum=document.getElementById('d-ang'), angR=document.getElementById('d-ang-r');
@@ -1614,32 +1631,11 @@ document.getElementById('sampleTrack').addEventListener('input', renderSample);
     sampleSel=null; renderSample();
   });
 
-  // keydown lives on #sampleSvg ONLY (never document / never #sampleText), so arrows in the
-  // text field keep moving the caret. It also no-ops unless a selection exists.
-  sampleSvg.addEventListener('keydown', (e)=>{
-    if(!sampleSel) return;
-    const STEP = e.altKey?1:5;
-    let handled=true;
-    if(e.key==='ArrowRight' || e.key==='ArrowLeft'){
-      const dir = e.key==='ArrowRight'?1:-1;
-      pushHistory();
-      if(sampleSel.type==='glyph'){
-        const g=glyphOf(sampleSel.ch);
-        if(e.shiftKey){ g.lsb=(typeof g.lsb==='number'?g.lsb:metrics.sidebearing)+dir*STEP; }
-        else          { g.rsb=(typeof g.rsb==='number'?g.rsb:metrics.sidebearing)+dir*STEP; }
-      } else {
-        const key=sampleSel.left+sampleSel.right;
-        kerning[key]=(kerning[key]||0)+dir*STEP;
-      }
-      renderAll(); scheduleSave();
-    } else if(e.key==='Backspace' || e.key==='Delete'){
-      pushHistory();
-      if(sampleSel.type==='glyph'){ const g=glyphOf(sampleSel.ch); delete g.lsb; delete g.rsb; }
-      else delete kerning[sampleSel.left+sampleSel.right];
-      renderAll(); scheduleSave();
-    } else handled=false;
-    if(handled) e.preventDefault();
-  });
+  // NOTE: the arrow/Backspace NUDGE keys are handled in the GLOBAL keydown handler (search
+  // "sample-strip spacing/kern nudge"), NOT here — binding keydown to #sampleSvg required the
+  // SVG to hold focus, which is unreliable, so nudges silently did nothing. The global handler
+  // acts whenever a strip selection exists and no form field is focused (caret keys in
+  // #sampleText stay intact via its INPUT/TEXTAREA guard).
 })();
 
 // Boot: rehydrate (which migrates metric guides into hG via applyProject) or, on a fresh
