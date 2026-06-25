@@ -1423,19 +1423,25 @@ function glyphRings(ch){
 // ---- spacing model: ink bounds + per-glyph advance + kern map ---------------
 // glyphInk reuses the SAME flattened outline geometry as the OTF export (glyphRings,
 // canvas coords, honors corner rounding + effGuides), so ink matches exactly what's drawn.
-// Width is measured in the OBLIQUE coordinate c = x + K*y (= cval), NOT the axis-aligned
-// x-bbox: a slanted stem has constant c, so changing the oblique angle no longer inflates
-// the advance by K*height (which made letter gaps balloon with the slant). Placement is
-// unaffected — translating a glyph in x shifts every point's c by the same amount, so the
-// returned {minx,maxx} (in c-space) drive renderSample's tx and buildFont's xoff correctly.
-// Returns {minx,maxx,width} in c-space, or null if the glyph has no ink.
+//
+// WIDTH is measured in the OBLIQUE axis c = x + K*y, NOT the axis-aligned x-bbox: a slanted
+// stem has constant c, so changing the oblique angle no longer inflates the advance by
+// K*height (which made letter gaps balloon with the slant).
+//
+// minx/maxx stay in X-SPACE so the strip layout, selection highlights, hit-testing and the
+// viewBox all stay in one coordinate system: we report the x where each edge crosses the
+// BASELINE (x = c - K*baseline). Placing the left edge's baseline-crossing at penX+lsb keeps
+// glyphs near their old positions (only descender depth, not full height, can overhang), so
+// nothing clips and the slanted ink leans within its advance box.
+// Returns {minx,maxx,width} (minx/maxx in x at the baseline; width slant-invariant) or null.
 function glyphInk(ch){
   const g=GLYPHS.get(ch); if(!g) return null;
   const loops=glyphRings(ch); if(!loops || !loops.length) return null;
-  let mn=Infinity, mx=-Infinity;
-  for(const lp of loops) for(const p of lp){ const c=p[0]+K*p[1]; if(c<mn)mn=c; if(c>mx)mx=c; }
-  if(!isFinite(mn)) return null;
-  return {minx:mn, maxx:mx, width:Math.max(0, mx-mn)};
+  const base=metricY('baseline');
+  let cmn=Infinity, cmx=-Infinity;
+  for(const lp of loops) for(const p of lp){ const c=p[0]+K*p[1]; if(c<cmn)cmn=c; if(c>cmx)cmx=c; }
+  if(!isFinite(cmn)) return null;
+  return {minx:cmn - K*base, maxx:cmx - K*base, width:Math.max(0, cmx-cmn)};
 }
 // glyphSpacing: per-glyph advance = lsb + inkWidth + rsb. lsb/rsb auto from the global
 // sidebearing unless overridden by g.lsb/g.rsb (Task 2). Empty/undesigned glyphs fall
